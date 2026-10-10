@@ -22,6 +22,8 @@ class RoadPerception:
     def __init__(self, config: VisionConfig):
         self.config = config
         self.estimated_half_track_width = 150.0  # Default pixel width estimate for single-boundary fallback
+        # Safety margin: car width expressed as ratio of track width (15cm car / typical 60cm track = 0.25)
+        self.car_width_ratio = self.config.car_width_cm / 60.0  # Assumes typical 60cm track width
 
     def extract_roi(self, frame: np.ndarray) -> Tuple[np.ndarray, int, int]:
         """Crop frame to Region of Interest (ROI) containing the relevant track area."""
@@ -131,14 +133,19 @@ class RoadPerception:
 
                     # If left and right boundaries are separated by a plausible road width
                     if (right_boundary - left_boundary) > (roi_w * 0.2):
-                        cx = (left_boundary + right_boundary) / 2.0
-                        self.estimated_half_track_width = (right_boundary - left_boundary) / 2.0
+                        track_width = right_boundary - left_boundary
+                        # Calculate safe center with car width margin: offset from each wall by half car width
+                        safety_margin = (track_width * self.car_width_ratio) / 2.0
+                        safe_left = left_boundary + safety_margin
+                        safe_right = right_boundary - safety_margin
+                        cx = (safe_left + safe_right) / 2.0
+                        self.estimated_half_track_width = track_width / 2.0
                     elif left_boundary > center_x:
-                        # Only right wall visible -> aim to the left of it
-                        cx = max(0.0, left_boundary - self.estimated_half_track_width)
+                        # Only right wall visible -> aim to the left of it with extra margin
+                        cx = max(0.0, left_boundary - self.estimated_half_track_width * (1.0 + self.car_width_ratio))
                     else:
-                        # Only left wall visible -> aim to the right of it
-                        cx = min(float(roi_w), right_boundary + self.estimated_half_track_width)
+                        # Only left wall visible -> aim to the right of it with extra margin
+                        cx = min(float(roi_w), right_boundary + self.estimated_half_track_width * (1.0 + self.car_width_ratio))
 
                     weight = 1.0 + (i / float(num_slices))
                     slice_centers.append(cx)

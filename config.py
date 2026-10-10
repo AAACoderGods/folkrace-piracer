@@ -41,6 +41,9 @@ class VisionConfig:
     # Number of scanlines / slices for center extraction
     num_scan_slices: int = 5
 
+    # Car physical dimensions (in centimeters)
+    car_width_cm: float = 15.0
+
     # Debug image visualization flag
     show_debug_window: bool = False
 
