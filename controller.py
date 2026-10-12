@@ -151,6 +151,11 @@ class VehicleController:
             steering = float(np.clip(self.current_steering * 0.9, self.config.min_steering, self.config.max_steering))
             # Keep throttle above deadband so vehicle doesn't stall completely during brief blinks
             throttle = max(self.config.min_throttle, self.config.throttle_deadband)
+            # The same polarity inversion used for the normal driving path must also
+            # apply here, otherwise an inverted ESC would receive the opposite sign
+            # while the car is searching -- effectively reversing under track loss.
+            if self.config.invert_throttle:
+                throttle = -throttle
             return steering, throttle
 
         # Compute PID steering
@@ -164,15 +169,18 @@ class VehicleController:
         speed_reduction = turn_severity * self.config.turn_slowdown_factor
         raw_throttle = self.config.base_throttle * (1.0 - speed_reduction)
 
-        if self.config.invert_throttle:
-            raw_throttle = -raw_throttle
+        # Throttle deadband compensation: ensure motor receives enough voltage to start turning.
+        # Applied before the invert so the deadband is always a magnitude, not a sign.
+        throttle = float(np.clip(max(raw_throttle, self.config.throttle_deadband),
+                                 self.config.min_throttle, self.config.max_throttle))
 
-        # Throttle deadband compensation: ensure motor receives enough voltage to start turning
-        if raw_throttle > 0:
-            throttle = float(np.clip(max(raw_throttle, self.config.throttle_deadband),
-                                     self.config.min_throttle, self.config.max_throttle))
-        else:
-            throttle = float(np.clip(raw_throttle, self.config.reverse_throttle, 0.0))
+        # Invert last, and symmetrically: negating the already-clamped magnitude
+        # keeps the reverse speed equal to the forward speed. Inverting earlier
+        # sent the value through the reverse branch below, where it was clipped
+        # to reverse_throttle (-0.25) -- a car that crawled backwards at half the
+        # speed it drove forwards.
+        if self.config.invert_throttle:
+            throttle = -throttle
 
         return steering, throttle
 

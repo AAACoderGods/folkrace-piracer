@@ -96,7 +96,10 @@ class Camera:
         if PICAMERA2_AVAILABLE and self.picam2 is not None:
             try:
                 frame = self.picam2.capture_array()
-                frame = numpy.rot90(frame, 2, (1, 0))
+                # 180-degree rotation to undo the sensor's mounting orientation.
+                # axes=(0, 1) is the conventional spelling; (1, 0) happens to give
+                # the same result for k=2 but reads as if the axes were swapped.
+                frame = numpy.rot90(frame, 2, (0, 1))
                 if frame is not None and len(frame.shape) == 3:
                     if frame.shape[2] == 4 and cv2 is not None:
                         frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)

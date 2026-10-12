@@ -22,8 +22,13 @@ class RoadPerception:
     def __init__(self, config: VisionConfig):
         self.config = config
         self.estimated_half_track_width = 150.0  # Default pixel width estimate for single-boundary fallback
-        # Safety margin: car width expressed as ratio of track width (15cm car / typical 60cm track = 0.25)
-        self.car_width_ratio = self.config.car_width_cm / 60.0  # Assumes typical 60cm track width
+        # Safety margin: car width as a fraction of the *physical* track width.
+        # Both terms are centimetres, so the ratio is dimensionless and can be
+        # multiplied by a pixel track width to get a pixel margin. Dividing the
+        # car width by a pixel count (the old `car_width_cm / 60.0`) produced a
+        # number that only looked plausible because the track happened to be
+        # about 60 px wide in the test footage.
+        self.car_width_ratio = self.config.car_width_cm / self.config.track_width_cm
 
     def extract_roi(self, frame: np.ndarray) -> Tuple[np.ndarray, int, int]:
         """Crop frame to Region of Interest (ROI) containing the relevant track area."""

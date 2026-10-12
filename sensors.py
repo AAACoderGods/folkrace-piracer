@@ -8,6 +8,7 @@ import logging
 import threading
 import time
 from typing import Tuple, Optional
+import numpy as np
 from config import SensorConfig
 
 try:
@@ -212,16 +213,39 @@ class SensorManager:
             return adjusted_steering, adjusted_throttle, is_emergency
 
         # Left wall proximity push right
-        if left_dist < self.config.side_warning_dist_cm or left_ir_blocked:
-            bias = (self.config.side_warning_dist_cm - left_dist) / self.config.side_warning_dist_cm
-            adjusted_steering = max(adjusted_steering, bias * 0.8)
-
+        left_bias = self._wall_bias(left_dist, left_ir_blocked)
         # Right wall proximity push left
-        if right_dist < self.config.side_warning_dist_cm or right_ir_blocked:
-            bias = (self.config.side_warning_dist_cm - right_dist) / self.config.side_warning_dist_cm
-            adjusted_steering = min(adjusted_steering, -bias * 0.8)
+        right_bias = self._wall_bias(right_dist, right_ir_blocked)
+
+        # Both walls close at once (a narrow corridor): the two corrections point
+        # in opposite directions, and applying them in sequence let the second
+        # one always win -- the car would drift left through every gap. Cancel
+        # them against each other instead, so a symmetric corridor steers straight.
+        if left_bias > 0.0 and right_bias > 0.0:
+            net = (left_bias - right_bias) * 0.8
+            adjusted_steering = float(np.clip(adjusted_steering + net, -1.0, 1.0))
+        elif left_bias > 0.0:
+            adjusted_steering = max(adjusted_steering, left_bias * 0.8)
+        elif right_bias > 0.0:
+            adjusted_steering = min(adjusted_steering, -right_bias * 0.8)
 
         return adjusted_steering, adjusted_throttle, is_emergency
+
+    def _wall_bias(self, distance: float, ir_blocked: bool) -> float:
+        """
+        How hard to steer away from one wall, in [0.0, 1.0].
+
+        The IR sensor reports a boolean, not a distance, so when it fires but the
+        ultrasonic reading is missing (999.0) the old code computed a bias of
+        (25 - 999) / 25 = -39 and the subsequent max()/min() discarded it -- the
+        IR sensor was effectively dead. Treat a blocked IR as "at the warning
+        threshold" instead, which is the strongest claim it can actually make.
+        """
+        if distance < self.config.side_warning_dist_cm:
+            return (self.config.side_warning_dist_cm - distance) / self.config.side_warning_dist_cm
+        if ir_blocked:
+            return 1.0
+        return 0.0
 
     def cleanup(self):
         """Stop the sampler thread and clean up GPIO resources."""

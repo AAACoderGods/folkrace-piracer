@@ -62,7 +62,7 @@ def draw_mode_banner(frame, source: str):
     most reliable way to make "this car is not driving itself" impossible to miss.
     Autonomous driving draws nothing, keeping a race-day feed clean.
     """
-    if source == SOURCE_AUTO:
+    if source == SOURCE_AUTO or cv2 is None:
         return
 
     if source == SOURCE_MANUAL:

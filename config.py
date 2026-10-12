@@ -43,6 +43,9 @@ class VisionConfig:
 
     # Car physical dimensions (in centimeters)
     car_width_cm: float = 15.0
+    # Physical track width in centimetres. Used only to turn car_width_cm into a
+    # dimensionless safety-margin ratio; it is not a pixel measurement.
+    track_width_cm: float = 60.0
 
     # Debug image visualization flag
     show_debug_window: bool = False
@@ -51,30 +54,30 @@ class VisionConfig:
 @dataclass
 class ControlConfig:
     # control
-    kp = 0.65
-    ki = 0
-    kd = 0.12
-    base_throttle = 0.3
-    max_throttle = 0.5
-    min_throttle = 0.22
-    throttle_deadband = 0.18
-    turn_slowdown_factor = 0.06
-    reverse_throttle = -0.25
-    steering_trim = 0
-    esc_arm_time = 1.0
-    invert_steering = False
-    invert_throttle = False
-    steering_sensitivity = 1.0
-    min_steering = -1.0
-    max_steering = 1.0
+    kp: float = 0.65
+    ki: float = 0
+    kd: float = 0.12
+    base_throttle: float = 0.3
+    max_throttle: float = 0.5
+    min_throttle: float = 0.22
+    throttle_deadband: float = 0.18
+    turn_slowdown_factor: float = 0.06
+    reverse_throttle: float = -0.25
+    steering_trim: float = 0
+    esc_arm_time: float = 1.0
+    invert_steering: bool = False
+    invert_throttle: bool = False
+    steering_sensitivity: float = 1.0
+    min_steering: float = -1.0
+    max_steering: float = 1.0
 
     # vision
-    roi_top_ratio = 0.45
-    roi_bottom_ratio = 0.95
-    detection_mode = "edge_contours"
-    num_scan_slices = 5
-    canny_threshold1 = 50
-    canny_threshold2 = 150
+    roi_top_ratio: float = 0.45
+    roi_bottom_ratio: float = 0.95
+    detection_mode: str = "edge_contours"
+    num_scan_slices: int = 5
+    canny_threshold1: int = 50
+    canny_threshold2: int = 150
 
 
 @dataclass

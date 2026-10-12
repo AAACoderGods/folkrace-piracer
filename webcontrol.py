@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from config import AppConfig, RemoteConfig
+from config import AppConfig, ControlConfig, RemoteConfig, VisionConfig
 
 # Driving modes. The car is autonomous unless a human explicitly changes this,
 # and only ever from PAUSED.
@@ -345,6 +345,10 @@ class RemoteState:
 
     def set_drive(self, steering: float, throttle: float) -> dict:
         """Accept one manual drive command. Clamped here and again in the main loop."""
+        # Reject booleans explicitly: JSON true/false must never become 1.0/0.0.
+        if isinstance(steering, bool) or isinstance(throttle, bool):
+            return {"ok": False, "error": "steering and throttle must be numbers"}
+
         with self._lock:
             if not self.remote.allow_manual:
                 return {"ok": False, "error": "manual control is not enabled"}
@@ -454,8 +458,6 @@ class RemoteState:
 
     def _reset_defaults(self) -> dict:
         """Write the dataclass defaults back field by field (never rebind the object)."""
-        from config import ControlConfig, VisionConfig
-
         defaults = {"control": ControlConfig(), "vision": VisionConfig()}
         restored: Dict[str, object] = {}
         for param in TUNABLES:
@@ -467,6 +469,9 @@ class RemoteState:
 
     @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
+        # JSON true/false must never become 1.0/0.0. Returning 0 keeps the car safe.
+        if isinstance(value, bool):
+            return 0.0
         try:
             value = float(value)
         except (TypeError, ValueError):
