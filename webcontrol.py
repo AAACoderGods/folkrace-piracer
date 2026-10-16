@@ -11,6 +11,8 @@ under a lock, and the main control loop reads a single snapshot per frame.
 """
 
 import logging
+import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -225,6 +227,19 @@ def roi_invariant_violation(config: AppConfig) -> Optional[str]:
     return None
 
 
+def _py_repr(value) -> str:
+    """Return a valid Python literal representing the value."""
+    if isinstance(value, str):
+        return repr(value)
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, tuple):
+        return "(" + ", ".join(_py_repr(v) for v in value) + ")"
+    return str(value)   # fallback, unlikely for our fields
+
+
 class RemoteState:
     """
     Thread-safe bridge between the HTTP handler threads and the main control loop.
@@ -422,6 +437,79 @@ class RemoteState:
                 applied = dict(pending)
 
         return applied, rejected
+
+    def save_config(self) -> dict:
+        """
+        Write tunable values back into config.py on disk.
+
+        The file is overwritten in place, preserving comments and all non-tunable
+        fields. The current running process keeps using the in-memory values until
+        it is restarted; a restart will pick up the saved defaults.
+        """
+        import config as config_module
+
+        config_path = os.path.abspath(config_module.__file__)
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except OSError as exc:
+            return {"ok": False, "error": f"cannot read config.py: {exc}"}
+
+        with self._lock:
+            tunable_values = {param.key: _get_config_value(self.config, param.key)
+                              for param in TUNABLES}
+
+        section_to_class = {
+            "camera": "CameraConfig",
+            "vision": "VisionConfig",
+            "control": "ControlConfig",
+            "sensor": "SensorConfig",
+            "stream": "StreamConfig",
+            "remote": "RemoteConfig",
+        }
+        class_to_section = {v: k for k, v in section_to_class.items()}
+
+        current_class: Optional[str] = None
+        new_lines = []
+
+        for line in lines:
+            stripped = line.strip()
+            # Identify the class declaration that owns the following field lines.
+            match_class = re.match(r'^class\s+(\w+)\s*:', stripped)
+            if match_class:
+                current_class = match_class.group(1)
+
+            if current_class is not None and "=" in line:
+                left_part, right_part = line.split("=", 1)
+                match_field = re.match(r'^\s*(\w+)\s*:', left_part)
+                if match_field:
+                    field_name = match_field.group(1)
+                    section = class_to_section.get(current_class)
+                    if section is not None:
+                        key = f"{section}.{field_name}"
+                        if key in tunable_values:
+                            # Extract value and optional comment from the right side.
+                            right_part = right_part.rstrip('\n')
+                            if '#' in right_part:
+                                value_str, comment_str = right_part.split('#', 1)
+                                comment_str = '#' + comment_str
+                            else:
+                                value_str = right_part
+                                comment_str = ''
+                            new_value = _py_repr(tunable_values[key])
+                            new_right = f"{new_value}{'  ' + comment_str if comment_str else ''}"
+                            line = f"{left_part.rstrip()} = {new_right}\n"
+
+            new_lines.append(line)
+
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                f.writelines(new_lines)
+        except OSError as exc:
+            return {"ok": False, "error": f"cannot write config.py: {exc}"}
+
+        logging.info("Config saved to %s", config_path)
+        return {"ok": True, "path": config_path}
 
     def snapshot(self) -> dict:
         """Full state for the web UI: permissions, mode, limits, parameter values."""

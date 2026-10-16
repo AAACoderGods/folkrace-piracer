@@ -156,6 +156,18 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlsplit(self.path).path
 
+        if path == '/api/save_config':
+            existing = self.remote
+            if existing is None:
+                self._send_json({"ok": False, "error": "remote control is not available"}, 503)
+                return
+            result = existing.save_config()
+            status = 200 if result.get("ok") else 403
+            if not result.get("ok"):
+                result["state"] = existing.snapshot()
+            self._send_json(result, status)
+            return
+
         if path not in ('/api/manual', '/api/tune'):
             self.send_error(404)
             return

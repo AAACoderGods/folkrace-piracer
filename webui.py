@@ -104,7 +104,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
 
         "tuning.reset_pid": "Reset PID State",
         "tuning.reset_defaults": "Reset to Defaults",
-        "tuning.copy": "Copy as config.py",
+        "tuning.copy": "Save to config.py",
         "tuning.hint": "Changes apply immediately, even while the car is driving. "
                        "The car keeps following the line — this tab never takes over steering.",
 
@@ -128,6 +128,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         "status.defaults": "Restored the built-in defaults.",
         "status.copied": "Copied. Paste the values into config.py before the next run.",
         "status.copy_manual": "Select the text below and copy it manually.",
+        "status.saved": "Saved to config.py.",
         "status.armed": "Armed. Hold a control to drive; it stops on its own if commands stop.",
         "status.armed_keyboard": "Armed via keyboard.",
         "status.arm_failed": "Could not arm: ",
@@ -158,7 +159,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
 
         "tuning.reset_pid": "重置 PID 状态",
         "tuning.reset_defaults": "恢复默认值",
-        "tuning.copy": "复制为 config.py",
+        "tuning.copy": "保存到 config.py",
         "tuning.hint": "改动立即生效，车辆行驶中也一样。车始终自主循线 —— 本页签从不接管转向。",
 
         "manual.warning": "手动控制是<strong>仅限测试</strong>的工具。比赛全程自主驾驶。"
@@ -179,6 +180,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         "status.defaults": "已恢复内置默认值。",
         "status.copied": "已复制。下次运行前把数值粘回 config.py。",
         "status.copy_manual": "请手动选中下方文本复制。",
+        "status.saved": "已保存到 config.py。",
         "status.armed": "已解锁。按住控制键才会动；指令中断会自动停车。",
         "status.armed_keyboard": "已通过键盘解锁。",
         "status.arm_failed": "解锁失败：",
@@ -959,6 +961,15 @@ async function flushTune() {
     }
 }
 
+async function saveConfigToFile() {
+    const { data } = await postJSON("/api/save_config", {});
+    if (data && data.ok) {
+        statusLine("tune-status", t("status.saved"), "good");
+    } else {
+        statusLine("tune-status", ((data && data.error) ? data.error : t("common.no_response")), "bad");
+    }
+}
+
 function bindTuningButtons() {
     const resetPid = $("btn-reset-pid");
     if (resetPid) resetPid.addEventListener("click", async () => {
@@ -973,442 +984,36 @@ function bindTuningButtons() {
         statusLine("tune-status", t("status.defaults"), "good");
     });
 
-    const snippet = $("btn-snippet");
-    if (snippet) snippet.addEventListener("click", async () => {
-        const text = configSnippet();
-        const pre = $("snippet");
-        pre.textContent = text;
-        pre.hidden = false;
-        statusLine("tune-status", (await copyText(text))
-            ? t("status.copied") : t("status.copy_manual"), "good");
-    });
+    const saveBtn = $("btn-snippet");
+    if (saveBtn) saveBtn.addEventListener("click", saveConfigToFile);
 }
-
-function configSnippet() {
-    const bySection = new Map();
-    for (const p of STATE.schema) {
-        const parts = p.key.split(".");
-        const value = STATE.params[p.key];
-        const literal = (typeof value === "string") ? JSON.stringify(value) : value;
-        if (!bySection.has(parts[0])) bySection.set(parts[0], []);
-        bySection.get(parts[0]).push("    " + parts[1] + " = " + literal);
-    }
-    const out = [];
-    for (const [section, lines] of bySection) out.push("# " + section + "\n" + lines.join("\n"));
-    return out.join("\n\n");
-}
-
-async function copyText(text) {
-    // navigator.clipboard is unavailable on plain http, which is exactly how this
-    // page is reached on the LAN, so the textarea fallback is the common path.
-    try {
-        if (window.isSecureContext && navigator.clipboard) {
-            await navigator.clipboard.writeText(text);
-            return true;
-        }
-    } catch (e) { /* fall through */ }
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.appendChild(area);
-    area.select();
-    let ok = false;
-    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
-    document.body.removeChild(area);
-    return ok;
-}
-
-/* ------------------------------------------------------------------ *
- * Manual tab - the driving cockpit
- * ------------------------------------------------------------------ */
-
-let inFlight = null;   // AbortController of the request on the wire, or null.
-let sendTimer = null;
-let holdTimer = null;
-let holdFrame = null;
-let holdStart = 0;
-
-function startSending() {
-    if (sendTimer !== null || !HAS_REMOTE) return;
-    sendTimer = setInterval(pushDrive, SEND_INTERVAL_MS);
-}
-
-function stopSending() {
-    if (sendTimer !== null) { clearInterval(sendTimer); sendTimer = null; }
-    // Leaving manual mode makes anything still on the wire meaningless.
-    if (inFlight !== null) { inFlight.abort(); inFlight = null; }
-}
-
-async function pushDrive() {
-    // Single-flight: a slow response must never let drive commands stack up, or
-    // the car would keep executing a queue of stale inputs after the operator stops.
-    //
-    // The deadline is what stops single-flight from becoming "stopped". A request
-    // that never settles holds the flag forever and the send loop goes quiet with
-    // no error anywhere -- the failure the operator experiences as a car that
-    // ignores a held key. Aborting releases the flag so the next tick retries.
-    if (inFlight !== null || STATE.mode !== "manual") return;
-    const controller = new AbortController();
-    inFlight = controller;
-    const expiry = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
-    try {
-        await postJSON("/api/manual",
-                       { steering: AXIS.steering, throttle: AXIS.throttle },
-                       controller.signal);
-    } catch (e) { /* transient network hiccup; the deadman covers a real outage */ }
-    finally {
-        clearTimeout(expiry);
-        // Only if a newer request has not already taken the slot.
-        if (inFlight === controller) inFlight = null;
-    }
-}
-
-/* Integrate the held keys into the two axis values.
- *
- * A key press is an intent, not a position. Stepping straight to full lock every
- * time a key goes down shock-loads the steering servo and the ESC, and a car
- * that jumps to max throttle is a miserable thing to drive near a wall. Nothing
- * latches: with no key held, both axes walk back to centre on their own. */
-function updateAxes(dt) {
-    const steerDir = (HELD.d ? 1 : 0) - (HELD.a ? 1 : 0);
-    if (steerDir !== 0) {
-        const limit = STATE.limits.max_steering || 1;
-        AXIS.steering = clamp(AXIS.steering + steerDir * STEER_RATE * dt, -limit, limit);
-    } else {
-        AXIS.steering = approach(AXIS.steering, 0, STEER_RETURN * dt);
-    }
-
-    const thrDir = (HELD.w ? 1 : 0) - (HELD.s ? 1 : 0);
-    if (thrDir > 0) {
-        AXIS.throttle = Math.min(AXIS.throttle + THROTTLE_RISE * dt, STATE.limits.max_throttle);
-    } else if (thrDir < 0) {
-        AXIS.throttle = Math.max(AXIS.throttle - THROTTLE_FALL * dt, STATE.limits.max_reverse);
-    } else {
-        AXIS.throttle = approach(AXIS.throttle, 0, THROTTLE_FALL * dt);
-    }
-}
-
-/* The gauges read the local axis values rather than the polled telemetry, so they
-   move at 60 fps instead of stepping at the 500 ms state poll. */
-function renderDash() {
-    const needle = $("needle-steer");
-    const fill = $("fill-thr");
-    if (!needle || !fill) return;
-
-    const steerLimit = STATE.limits.max_steering || 1;
-    const steerRatio = clamp(AXIS.steering / steerLimit, -1, 1);
-    needle.style.left = (50 + steerRatio * 50) + "%";
-    needle.classList.toggle("wide", Math.abs(steerRatio) > 0.75);
-
-    // The throttle range is asymmetric (+0.40 / -0.25), so the scale is the larger
-    // half and the centre line always means zero.
-    const thrLimit = Math.max(STATE.limits.max_throttle || 0.4,
-                              Math.abs(STATE.limits.max_reverse || 0.25));
-    const thrRatio = clamp(AXIS.throttle / thrLimit, -1, 1);
-    const span = Math.abs(thrRatio) * 50;
-    fill.style.height = span + "%";
-    fill.style.bottom = (thrRatio >= 0 ? 50 : 50 - span) + "%";
-    fill.classList.toggle("reverse", thrRatio < 0);
-
-    if ($("dash-steer")) $("dash-steer").textContent = signed(AXIS.steering);
-    if ($("dash-thr")) $("dash-thr").textContent = signed(AXIS.throttle);
-}
-
-/* Centre both axes without touching what is physically held down. */
-function releaseAxes() {
-    AXIS.steering = 0;
-    AXIS.throttle = 0;
-}
-
-/* Released, blurred, hidden, stopped -- every one of them means the operator is no
-   longer driving, so the axes and the physical key state are both dropped.
-   Clearing HELD matters: no keyup ever arrives for a key held through a window
-   blur, and without this that key still reads as pressed on the way back in. */
-function releaseAll() {
-    for (const key in HELD) HELD[key] = false;
-    releaseAxes();
-    for (const button of document.querySelectorAll(".pad-btn.held")) button.classList.remove("held");
-    renderDash();
-}
-
-function syncInputs() {
-    for (const el of document.querySelectorAll("#tune-groups [data-key]")) {
-        const value = STATE.params[el.dataset.key];
-        if (value === undefined || isBusy(el)) continue;
-        const next = String(value);
-        if (el.value !== next) el.value = next;
-    }
-}
-
-/* Skipping the focused control is what keeps the 500 ms poll from yanking a
-   slider back out of the operator's hand mid-drag. */
-function isBusy(el) {
-    return el === document.activeElement || el.dataset.dragging === "1";
-}
-
-function bindManualInputs() {
-    for (const button of document.querySelectorAll(".pad-btn")) {
-        const key = button.dataset.key;
-        const press = (event) => {
-            event.preventDefault();
-            button.setPointerCapture(event.pointerId);
-            button.classList.add("held");
-            // Arming is a deliberate two-second hold, and a throttle key already
-            // down when it completes would launch the car the instant it arms.
-            if (STATE.mode !== "manual") return;
-            HELD[key] = true;
-        };
-        const release = () => {
-            button.classList.remove("held");
-            HELD[key] = false;
-        };
-        button.addEventListener("pointerdown", press);
-        button.addEventListener("pointerup", release);
-        // pointercancel fires on an incoming call or a system gesture; without it
-        // the finger is gone but the car is still driving.
-        button.addEventListener("pointercancel", release);
-        button.addEventListener("lostpointercapture", release);
-    }
-}
-
-function bindArmButton() {
-    const arm = $("btn-arm");
-    if (!arm) return;
-    const fill = arm.querySelector(".fill");
-
-    const tick = () => {
-        const elapsed = performance.now() - holdStart;
-        if (fill) fill.style.width = Math.min(100, (elapsed / ARM_HOLD_MS) * 100) + "%";
-        holdFrame = requestAnimationFrame(tick);
-    };
-
-    const start = (event) => {
-        if (event) event.preventDefault();
-        if (STATE.mode !== "paused") return;
-        holdStart = performance.now();
-        arm.classList.add("held");
-        holdFrame = requestAnimationFrame(tick);
-        holdTimer = setTimeout(async () => {
-            cancelHold();
-            const { data } = await postJSON("/api/manual", { action: "arm" });
-            statusLine("manual-status", (data && data.ok)
-                ? t("status.armed")
-                : (t("status.arm_failed") + " " + ((data && data.error) || t("common.no_response"))),
-                (data && data.ok) ? "good" : "bad");
-        }, ARM_HOLD_MS);
-    };
-
-    arm.addEventListener("pointerdown", start);
-    arm.addEventListener("pointerup", cancelHold);
-    arm.addEventListener("pointercancel", cancelHold);
-    arm.addEventListener("pointerleave", cancelHold);
-}
-
-function cancelHold() {
-    if (holdTimer !== null) { clearTimeout(holdTimer); holdTimer = null; }
-    if (holdFrame !== null) { cancelAnimationFrame(holdFrame); holdFrame = null; }
-    const arm = $("btn-arm");
-    if (arm) {
-        arm.classList.remove("held");
-        const fill = arm.querySelector(".fill");
-        if (fill) fill.style.width = "0%";
-    }
-}
-
-function bindManualButtons() {
-    if ($("btn-stop")) $("btn-stop").addEventListener("click", doStop);
-    if ($("btn-start")) $("btn-start").addEventListener("click", async () => {
-        const { data } = await postJSON("/api/manual", { action: "start" });
-        statusLine("manual-status", (data && data.ok) ? t("status.autonomous")
-            : (t("status.start_failed") + " " + ((data && data.error) || t("common.no_response"))),
-            (data && data.ok) ? "good" : "bad");
-    });
-}
-
-function doStop() {
-    releaseAll();
-    cancelHold();
-    postJSON("/api/manual", { action: "stop" });
-    statusLine("manual-status", t("status.stopped"), "good");
-}
-
-/* ------------------------------------------------------------------ *
- * Input, lifecycle
- * ------------------------------------------------------------------ */
-
-function bindKeyboard() {
-    let armKeyTimer = null;
-
-    window.addEventListener("keydown", (event) => {
-        if (event.repeat) return;   // the OS repeat rate is not a drive command
-        const key = event.key.toLowerCase();
-
-        if (event.key === " " || event.code === "Space") {
-            event.preventDefault();
-            if (STATE.mode !== "auto") doStop();
-            return;
-        }
-        if (key === "m") {
-            if (STATE.mode !== "paused") return;
-            armKeyTimer = setTimeout(async () => {
-                armKeyTimer = null;
-                const { data } = await postJSON("/api/manual", { action: "arm" });
-                statusLine("manual-status", (data && data.ok) ? t("status.armed_keyboard")
-                    : (t("status.arm_failed") + " " + ((data && data.error) || t("common.no_response"))),
-                    (data && data.ok) ? "good" : "bad");
-            }, ARM_HOLD_MS);
-            return;
-        }
-        if (key in HELD) {
-            event.preventDefault();
-            // Same rule as the on-screen pad: a key already down when the ARM hold
-            // completes must not be able to launch the car the instant it arms.
-            if (STATE.mode !== "manual") return;
-            HELD[key] = true;
-        }
-    });
-
-    window.addEventListener("keyup", (event) => {
-        const key = event.key.toLowerCase();
-        if (key === "m" && armKeyTimer !== null) { clearTimeout(armKeyTimer); armKeyTimer = null; return; }
-        if (key in HELD) HELD[key] = false;
-    });
-
-    window.addEventListener("blur", releaseAll);
-}
-
-function bindLifecycle() {
-    // A backgrounded tab stops being a reliable operator: drop to zero at once
-    // rather than let the deadman be the only thing between us and a runaway.
-    document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) return;
-        releaseAll();
-        lastFrame = 0;   // the animation clock stopped with the tab; do not integrate the gap
-        if (STATE.mode === "manual") {
-            postJSON("/api/manual", { steering: 0, throttle: 0 });
-        }
-    });
-
-    window.addEventListener("pagehide", () => {
-        if (STATE.mode !== "manual" || !navigator.sendBeacon) return;
-        // stop, never start: closing the page must not hand the car back to
-        // autonomous control while it is sitting somewhere unexpected.
-        navigator.sendBeacon("/api/manual",
-            new Blob([JSON.stringify({ action: "stop" })], { type: "application/json" }));
-    });
-}
-
-function bindTabs() {
-    const tabs = document.querySelectorAll(".tab");
-    for (const tab of tabs) {
-        tab.addEventListener("click", () => {
-            for (const other of tabs) other.classList.toggle("active", other === tab);
-            for (const panel of document.querySelectorAll(".panel")) {
-                panel.classList.toggle("active", panel.dataset.panel === tab.dataset.panel);
-            }
-            // The <img> lives outside the panels on purpose: rebuilding it would
-            // drop the MJPEG connection and black the picture out on every switch.
-            updateHud();
-        });
-    }
-    updateHud();
-}
-
-/* The gauge cluster belongs to the driving view, so it follows the Manual tab and
-   not the driving mode -- a page parked on Tuning is not being driven. */
-function updateHud() {
-    const dash = $("hud-dash");
-    if (!dash) return;
-    dash.hidden = !document.querySelector('.panel[data-panel="manual"].active');
-}
-
-let lastFrame = 0;
-
-function driveLoop(now) {
-    // Clamped, because a dropped frame must not turn into one enormous step.
-    const dt = lastFrame ? Math.min((now - lastFrame) / 1000, MAX_FRAME_DT) : 0;
-    lastFrame = now;
-    if (STATE.mode === "manual") {
-        // While the deadman owns the car nothing on this page is reaching it, so
-        // an axis that keeps winding up is not a command -- it is a spring being
-        // loaded for a lurch the instant the link clears. Hold both at centre and
-        // let them ramp again from there, which is also what the gauges then show.
-        if (STATE.telemetry.source === SOURCE_DEADMAN) releaseAxes();
-        else updateAxes(dt);
-    }
-    renderDash();
-    requestAnimationFrame(driveLoop);
-}
-
-function init() {
-    bindLangButtons();
-    // First, so nothing renders in the wrong language and then flips. A saved
-    // choice outranks the Accept-Language the server picked for us: it is the
-    // operator's own last decision, and the server cannot know about it.
-    applyLanguage(savedLang() || INITIAL_LANG, false);
-
-    bindTabs();
-    bindTuningButtons();
-    bindManualInputs();
-    bindArmButton();
-    bindManualButtons();
-    bindKeyboard();
-    bindLifecycle();
-
-    // Owns the axis integration and the gauges, so it runs whether or not a
-    // remote is attached -- with no remote there is simply nothing to drive.
-    requestAnimationFrame(driveLoop);
-
-    if (!HAS_REMOTE) return;
-    pollState();
-    setInterval(pollState, 500);
-}
-
-document.addEventListener("DOMContentLoaded", init);
 </script>
 </body>
 </html>
 """
 
-
-def render_page(remote: Optional[RemoteState], accept_language: str = "") -> str:
-    """
-    Build the console page for the current launch flags.
-
-    `accept_language` only decides the first paint. The page carries both languages
-    and the buttons override it from then on, so a wrong guess costs one click.
-    """
-    if remote is None:
-        allow_tuning = allow_manual = False
-        mode = MODE_AUTO
-    else:
-        state = remote.snapshot()
-        permissions = state["permissions"]
-        allow_tuning = permissions["tuning"]
-        allow_manual = permissions["manual"]
-        mode = state["mode"]
-
-    # Somebody who launched with --allow-manual came here to drive, so land them
-    # on that tab. Tuning-only runs have nothing else to show.
-    default_tab = "manual" if allow_manual else ("tuning" if allow_tuning else "")
-
+def render_page(existing: Optional[RemoteState], accept_language: str = "") -> str:
+    """Render the complete web console page."""
     lang = pick_language(accept_language)
-    # Only the badge is server-rendered; everything else is filled in by
-    # applyLanguage() the moment the script runs. That still matters -- the badge
-    # sits above the fold, and it is the one element whose first paint a viewer
-    # would notice being in the wrong language.
-    mode_text = _STRINGS[lang].get("badge.mode." + mode, mode.upper())
+    if existing is None:
+        allow_tuning = False
+        allow_manual = False
+        initial_mode = MODE_AUTO
+    else:
+        allow_tuning = existing.remote.allow_tuning
+        allow_manual = existing.remote.allow_manual
+        initial_mode = existing._mode
+
+    default_tab = "manual" if allow_manual else "tuning" if allow_tuning else ""
+    tabs = _tabs_html(allow_tuning, allow_manual, default_tab)
+    panels = _panels_html(allow_tuning, allow_manual, default_tab)
+    dash = _dash_html(allow_manual)
+
+    initial_mode_text = _STRINGS[lang]["badge.mode." + initial_mode]
 
     return (_TEMPLATE
-            .replace("__I18N_JSON__", _I18N_JSON)
             .replace("__INITIAL_LANG__", lang)
-            .replace("__TABS__", _tabs_html(allow_tuning, allow_manual, default_tab))
-            .replace("__PANELS__", _panels_html(allow_tuning, allow_manual, default_tab))
-            .replace("__DASH__", _dash_html(allow_manual))
-            .replace("__INITIAL_MODE_TEXT__", mode_text)
-            .replace("__INITIAL_MODE__", mode)
-            .replace("__HAS_REMOTE__", "true" if remote is not None else "false")
+            .replace("__HAS_REMOTE__", "true" if existing is not None else "false")
             .replace("__ARM_HOLD_MS__", str(ARM_HOLD_MS))
             .replace("__SEND_INTERVAL_MS__", str(SEND_INTERVAL_MS))
             .replace("__SEND_TIMEOUT_MS__", str(SEND_TIMEOUT_MS))
@@ -1417,4 +1022,10 @@ def render_page(remote: Optional[RemoteState], accept_language: str = "") -> str
             .replace("__STEER_RETURN__", str(STEER_RETURN))
             .replace("__THROTTLE_RISE__", str(THROTTLE_RISE))
             .replace("__THROTTLE_FALL__", str(THROTTLE_FALL))
-            .replace("__MAX_FRAME_DT__", str(MAX_FRAME_DT)))
+            .replace("__MAX_FRAME_DT__", str(MAX_FRAME_DT))
+            .replace("__I18N_JSON__", _I18N_JSON)
+            .replace("__INITIAL_MODE__", initial_mode)
+            .replace("__INITIAL_MODE_TEXT__", initial_mode_text)
+            .replace("__DASH__", dash)
+            .replace("__TABS__", tabs)
+            .replace("__PANELS__", panels))
