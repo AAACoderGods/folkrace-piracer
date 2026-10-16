@@ -12,6 +12,7 @@ import time
 
 from config import AppConfig
 from camera import Camera
+from depth_camera import DepthCamera
 from vision import RoadPerception
 from controller import VehicleController
 from sensors import SensorManager
@@ -79,6 +80,65 @@ def draw_mode_banner(frame, source: str):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
 
+class DepthGuard:
+    """
+    Forward-obstacle guard built on the depth camera.
+
+    Complements sensors.py rather than duplicating it: the ultrasonic and IR
+    sensors watch the sides, this watches what is directly ahead. It is written
+    as a class only so the "last logged at" timestamp has somewhere to live --
+    a car stopped in front of a wall would otherwise log a warning on every
+    single frame of the 30 Hz loop.
+    """
+
+    def __init__(self, camera: DepthCamera, config):
+        self.camera = camera
+        self.config = config
+        self._last_log_ts = 0.0
+        # Latest reading and coarse map, kept for the web console. Both are
+        # refreshed on every call so the page shows this frame's numbers rather
+        # than a stale one; None means "no usable depth right now".
+        self.last_distance_mm = None
+        self.grid = None
+
+    def apply(self, steering: float, throttle: float):
+        """
+        Return (steering, throttle, is_emergency) after the depth guard has run.
+
+        Only the emergency band changes steering, and it changes it to zero --
+        steering *around* an obstacle the depth camera can see is not something
+        this layer is allowed to attempt, because it cannot see the walls the
+        car would be steered into. The warning band only caps throttle.
+        """
+        try:
+            _, depth_frame = self.camera.capture_frame()
+        except Exception as e:
+            logging.debug(f"Depth capture failed: {e}")
+            return steering, throttle, False
+
+        self.grid = self.camera.depth_grid(depth_frame)
+        distance_mm = self.camera.measure_obstacle_mm(depth_frame)
+        self.last_distance_mm = distance_mm
+        if distance_mm is None:
+            return steering, throttle, False
+
+        if distance_mm < self.config.emergency_stop_mm:
+            # Edge-triggered on a 1 s interval. vehicle.stop() logs its own
+            # transition, but "why did it stop" is a different question when the
+            # depth camera is what asked, so a separate line is worth the noise.
+            now = time.monotonic()
+            if now - self._last_log_ts > 1.0:
+                logging.warning("Depth guard: emergency stop, obstacle at %.0f mm.",
+                                distance_mm)
+                self._last_log_ts = now
+            return 0.0, 0.0, True
+
+        if distance_mm < self.config.warning_mm:
+            return steering, min(throttle, self.config.warning_throttle), False
+
+        return steering, throttle, False
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Folkrace Autonomous Driving on PiRacer Pro")
     parser.add_argument("--display", action="store_true", help="Show live OpenCV visual debug window (GUI)")
@@ -95,6 +155,10 @@ def parse_args() -> argparse.Namespace:
                         help="Show the live parameter tuning tab on the web page (debug only)")
     parser.add_argument("--allow-manual", action="store_true",
                         help="Show the manual drive tab on the web page (test only; implies --allow-tuning)")
+    # Optional hardware. With this absent the depth camera is never constructed,
+    # so a machine without a working depth device behaves identically to today.
+    parser.add_argument("--allow-depth-camera", action="store_true",
+                        help="Enable the depth camera (DECXIN / UVC) for forward-obstacle ranging")
     return parser.parse_args()
 
 
@@ -136,6 +200,8 @@ def main():
         config.remote.allow_tuning = True   # driving by hand and tuning go together
     elif args.allow_tuning:
         config.remote.allow_tuning = True
+    if args.allow_depth_camera:
+        config.depth.enable_depth = True
 
     logging.info("=" * 50)
     logging.info(" Starting Folkrace PiRacer Pro Autonomous System")
@@ -144,6 +210,8 @@ def main():
     logging.info(f" Local GUI Display: {args.display}")
     logging.info(f" Web Browser Stream: {config.stream.enable_stream} (Port: {config.stream.port})")
     logging.info(f" Sensors Enabled: {config.sensor.enable_sensors}")
+    logging.info(f" Depth Camera: {config.depth.enable_depth} "
+                 f"(backend: {config.depth.backend}, device: {config.depth.uvc_device})")
     logging.info(f" Web Live Tuning: {config.remote.allow_tuning} | Web Manual Control: {config.remote.allow_manual}")
     logging.info("=" * 50)
 
@@ -161,6 +229,11 @@ def main():
         framerate=config.camera.framerate,
         format=config.camera.format
     )
+    # Constructed only when the flag was passed. Without it the depth camera is
+    # simply absent, which is the same shape as "constructed but fell back to mock
+    # with no obstacle ever in range".
+    depth_camera = DepthCamera(config.depth) if config.depth.enable_depth else None
+    depth_guard = DepthGuard(depth_camera, config.depth) if depth_camera is not None else None
     perception = RoadPerception(config.vision)
     vehicle = VehicleController(config.control)
     sensors = SensorManager(config.sensor)
@@ -177,6 +250,8 @@ def main():
 
     try:
         camera.start()
+        if depth_camera is not None:
+            depth_camera.start()
         vehicle.start()
         sensors.start()
         if streamer is not None:
@@ -221,26 +296,43 @@ def main():
                     steering, throttle, apply_steering_bias=(drive_source == SOURCE_AUTO)
                 )
 
+                # 5b. Depth guard (front proximity). Skipped once an emergency is
+                #     already latched: the depth camera takes time to fetch a frame
+                #     and there is nothing left to add to a full stop.
+                if depth_guard is not None and not is_emergency:
+                    steering, throttle, is_emergency = depth_guard.apply(steering, throttle)
+
                 # 6. Apply actuator commands
                 if is_emergency:
                     vehicle.stop()
                 else:
                     vehicle.set_drive(steering, throttle)
 
-                # 7. Publish telemetry to the web console
-                remote.publish_telemetry({
+                # 7. Publish telemetry to the web console.
+                #    The coarse depth grid rides along so the page can answer "how
+                #    far is the wall under the cursor" without a second endpoint or
+                #    a full-depth frame on the wire. It is a few kB and the page
+                #    only polls it once a second, so this costs the drive link
+                #    nothing measurable -- which matters, because that link is
+                #    what the deadman timeout is counting.
+                telemetry = {
                     "fps": round(current_fps, 1),
                     "steering": round(steering, 3),
                     "throttle": round(throttle, 3),
                     "detected": bool(detected),
                     "source": drive_source,
-                })
+                }
+                if depth_guard is not None:
+                    nearest = depth_guard.last_distance_mm
+                    telemetry["depth_mm"] = round(nearest, 1) if nearest is not None else None
+                    telemetry["depth_grid"] = depth_guard.grid
+                remote.publish_telemetry(telemetry)
 
                 # 8. Compose telemetry visual frame for GUI and/or Web Stream
                 visual_output_frame = debug_frame if debug_frame is not None else frame
                 if visual_output_frame is not None and cv2 is not None:
-                    telemetry = f"FPS: {current_fps:.1f} | Steer: {steering:+.2f} | Thr: {throttle:.2f}"
-                    cv2.putText(visual_output_frame, telemetry, (20, visual_output_frame.shape[0] - 20),
+                    overlay_text = f"FPS: {current_fps:.1f} | Steer: {steering:+.2f} | Thr: {throttle:.2f}"
+                    cv2.putText(visual_output_frame, overlay_text, (20, visual_output_frame.shape[0] - 20),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                     draw_mode_banner(visual_output_frame, drive_source)
 
@@ -289,6 +381,8 @@ def main():
         logging.info("Cleaning up and stopping vehicle...")
         vehicle.stop()
         camera.stop()
+        if depth_camera is not None:
+            depth_camera.stop()
         sensors.cleanup()
         if streamer is not None:
             streamer.stop()

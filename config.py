@@ -17,6 +17,112 @@ class CameraConfig:
 
 
 @dataclass
+class DepthCameraConfig:
+    """
+    Optional depth camera settings.
+
+    The depth camera runs *alongside* the main camera rather than replacing it:
+    Camera keeps feeding the line-following pipeline unchanged, and depth only
+    adds a forward-obstacle guard on top. That split is deliberate -- the depth
+    camera can drop off the USB bus, run out of frames, or be missing entirely,
+    and none of those should stop the car from following the line.
+
+    Front is where the depth camera earns its place: sensors.py covers the sides
+    with ultrasonic/IR, and nothing there looks at what is directly ahead.
+    """
+    # Master switch. --allow-depth-camera is what normally flips this.
+    enable_depth: bool = False
+
+    # Backend to use: "decxin" (UVC), "realsense", or "mock".
+    # An unavailable backend always falls back to mock rather than raising, so a
+    # missing library never takes the car off the track -- it just loses depth.
+    backend: str = "decxin"
+
+    # Device serial to open; empty means "the first one that answers".
+    # Only the RealSense backend uses this.
+    device_serial: str = ""
+
+    # Depth stream resolution and rate.
+    width: int = 640
+    height: int = 480
+    fps: int = 30
+
+    # How long to wait for a frame before giving up on this iteration, in ms.
+    # Deliberately short: the depth guard runs inside the 30 Hz control loop, so
+    # a stalled depth camera must not be allowed to hold the whole loop hostage.
+    # Only the RealSense backend uses it; OpenCV's blocking read is left as-is
+    # because a UVC device that stops answering is already returning empty frames.
+    capture_timeout_ms: int = 200
+
+    # Whether to also open the colour stream. Off by default -- the main camera
+    # already provides colour for line following, and an extra colour stream is
+    # pure USB bandwidth that the operator's drive commands have to share.
+    enable_color_stream: bool = False
+
+    # ------------------------------------------------------------------
+    # DECXIN-SM-2930V1 / generic UVC depth backend
+    #
+    # The camera hangs off the Pi's USB-C port as a plain UVC video device, so it
+    # needs no vendor library -- which is also why this backend is the default.
+    # Enumerate what the Pi actually sees with:
+    #     v4l2-ctl --list-devices
+    #     v4l2-ctl -d /dev/video2 --list-formats-ext
+    # and put the depth-capable node (not the RGB one, if the camera exposes both)
+    # in uvc_device.
+    # ------------------------------------------------------------------
+
+    # V4L2 device node, or a bare OpenCV index like "0".
+    uvc_device: str = "/dev/video2"
+
+    # Pixel format requested from the device. "Z16 " / "Y16 " are the 16-bit
+    # depth formats a UVC depth camera normally exposes; the trailing space is
+    # part of the four-character code, not a typo.
+    uvc_fourcc: str = "Z16 "
+
+    # Millimetres represented by one raw count. 1.0 is the common case (the device
+    # already reports millimetres); a device reporting in 0.1 mm units wants 0.1.
+    # If every measured distance looks off by a constant factor, this is the knob.
+    uvc_depth_unit_mm: float = 1.0
+
+    # ------------------------------------------------------------------
+    # Ranging
+    # ------------------------------------------------------------------
+
+    # Readings outside this range (in mm) are treated as invalid. Guards against
+    # both the 0 that depth cameras report for "no return" and the occasional
+    # overflow value, either of which would otherwise read as a wall right in
+    # front of the car and trigger a phantom emergency stop.
+    min_depth_mm: float = 150.0
+    max_depth_mm: float = 5000.0
+
+    # The forward scan band, as fractions of the frame.
+    # The row sits low in the image on purpose: that is the ground the front
+    # wheels are about to reach, not the horizon, which is always far away and
+    # would make the guard blind.
+    obstacle_scan_y_ratio: float = 0.70
+    obstacle_scan_width_ratio: float = 0.50
+
+    # Distance thresholds in mm. Below emergency_stop_mm the car is commanded to
+    # (0, 0) immediately; below warning_mm it is only speed-limited.
+    emergency_stop_mm: float = 300.0
+    warning_mm: float = 800.0
+
+    # The throttle ceiling inside the warning band.
+    warning_throttle: float = 0.15
+
+    # ------------------------------------------------------------------
+    # Web console readout
+    # ------------------------------------------------------------------
+
+    # Resolution of the coarse depth grid handed to the browser for the cursor
+    # readout. Deliberately tiny: the page polls it once a second and only needs
+    # enough detail to answer "roughly how far is the wall under this spot", so
+    # 32x24 keeps the whole payload to a few kB instead of shipping a full frame.
+    ui_grid_width: int = 32
+    ui_grid_height: int = 24
+
+
+@dataclass
 class VisionConfig:
     # Region of Interest (ROI) - vertical cropping from bottom (0.0: top, 1.0: bottom)
     roi_top_ratio: float = 0.45  # Focus on the track in front, ignore ceiling/horizon
@@ -156,6 +262,7 @@ class RemoteConfig:
 @dataclass
 class AppConfig:
     camera: CameraConfig = field(default_factory=CameraConfig)
+    depth: DepthCameraConfig = field(default_factory=DepthCameraConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
     sensor: SensorConfig = field(default_factory=SensorConfig)

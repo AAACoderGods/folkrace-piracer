@@ -96,8 +96,11 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         "telem.fps": "FPS",
         "telem.steer": "Steer",
         "telem.thr": "Thr",
+        "telem.depth": "Depth",
         "telem.line_ok": "LINE OK",
         "telem.line_lost": "LINE LOST",
+
+        "depth.none": "no reading",
 
         "gauge.steering": "STEERING",
         "gauge.throttle": "THR",
@@ -151,8 +154,11 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         "telem.fps": "FPS",
         "telem.steer": "转向",
         "telem.thr": "油门",
+        "telem.depth": "深度",
         "telem.line_ok": "循线正常",
         "telem.line_lost": "丢线",
+
+        "depth.none": "无读数",
 
         "gauge.steering": "转向",
         "gauge.throttle": "油门",
@@ -389,6 +395,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
     }
     .hud-dash { display: flex; gap: 18px; align-items: flex-end; justify-content: space-between; width: 100%; }
 
+    /* Cursor depth readout. Lives inside .stage, so the number is anchored to the
+       spot it describes rather than to a fixed corner of the page -- the operator
+       points at something and reads the distance off it. Follows the pointer only;
+       it never captures one, hence pointer-events: none. */
+    .depth-tip {
+        position: absolute; z-index: 3; padding: 3px 9px; border-radius: 6px;
+        font-family: var(--mono); font-size: 0.72rem; font-weight: 700; color: #06200e;
+        background: var(--neon); box-shadow: 0 0 16px rgba(0, 230, 118, 0.55);
+        white-space: nowrap; pointer-events: none; transform: translate(12px, -50%);
+    }
+    /* Amber, not green: "no reading here" must not look like a measurement. */
+    .depth-tip.unknown { background: var(--amber); box-shadow: 0 0 16px rgba(255, 179, 0, 0.55); }
+
     .topbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; margin: 12px 0 8px; }
 
     .badge {
@@ -585,9 +604,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
         </div>
     </div>
 
-    <div class="stage">
-        <img src="/stream.mjpg" alt="Live camera stream" data-i18n-alt="stream.alt">
+    <div class="stage" id="stage">
+        <img src="/stream.mjpg" id="stream-img" alt="Live camera stream" data-i18n-alt="stream.alt">
         <div class="hud">__DASH__</div>
+        <div class="depth-tip" id="depth-tip" hidden></div>
     </div>
 
     <div class="topbar">
@@ -800,6 +820,15 @@ function renderModeBadge() {
     if ($("manual-controls")) $("manual-controls").classList.toggle("off", !manual);
 }
 
+/* Distances are shown in whatever unit reads best at that scale: centimetres
+   near the car, metres further out. A single unit would either be unreadable at
+   4 m or silly at 30 cm. */
+function formatDepth(mm) {
+    if (typeof mm !== "number" || !(mm > 0)) return t("depth.none");
+    if (mm >= 1000) return (mm / 1000).toFixed(2) + " m";
+    return (mm / 10).toFixed(1) + " cm";
+}
+
 function renderTelemetry() {
     const el = $("telemetry");
     if (!el) return;
@@ -810,6 +839,9 @@ function renderTelemetry() {
     if (data.steering !== undefined) parts.push(t("telem.steer") + " " + signed(data.steering));
     if (data.throttle !== undefined) parts.push(t("telem.thr") + " " + signed(data.throttle));
     if (data.detected !== undefined) parts.push(data.detected ? t("telem.line_ok") : t("telem.line_lost"));
+    // Only present when --allow-depth-camera constructed the depth camera, so a
+    // run without one shows no Depth item at all rather than a permanent dash.
+    if (data.depth_mm !== undefined) parts.push(t("telem.depth") + " " + formatDepth(data.depth_mm));
     el.textContent = parts.length ? parts.join("  |  ") : "—";
 }
 
@@ -834,6 +866,83 @@ function statusLine(id, message, kind) {
     if (!el) return;
     el.textContent = message || "";
     el.className = "statusline" + (kind ? " " + kind : "");
+}
+
+/* ------------------------------------------------------------------ *
+ * Cursor depth readout
+ * ------------------------------------------------------------------ */
+
+/* Rect of the picture *inside* the element. object-fit: contain letterboxes the
+   image whenever the element is taller or wider than the frame's aspect ratio,
+   and it is the picture the depth pixels line up with -- mapping the pointer
+   against the element box instead would offset every reading near the edges. */
+function imageContentRect(img) {
+    const box = img.getBoundingClientRect();
+    const nw = img.naturalWidth, nh = img.naturalHeight;
+    if (!nw || !nh) return { left: box.left, top: box.top, width: box.width, height: box.height };
+    const scale = Math.min(box.width / nw, box.height / nh);
+    const width = nw * scale, height = nh * scale;
+    return {
+        left: box.left + (box.width - width) / 2,
+        top: box.top + (box.height - height) / 2,
+        width: width, height: height
+    };
+}
+
+/* The grid is a coarse server-side downsample of the depth frame, so one cell
+   covers a patch of the picture. That is the point: it is a reading for a human
+   pointing at a wall, not a per-pixel probe, and it keeps the payload small
+   enough to ride along with telemetry instead of needing its own stream. */
+function depthAt(clientX, clientY) {
+    const grid = STATE.telemetry && STATE.telemetry.depth_grid;
+    const img = $("stream-img");
+    if (!grid || !grid.mm || !grid.w || !grid.h || !img) return undefined;
+
+    const rect = imageContentRect(img);
+    if (clientX < rect.left || clientX > rect.left + rect.width ||
+        clientY < rect.top || clientY > rect.top + rect.height) {
+        return undefined;
+    }
+
+    const u = (clientX - rect.left) / rect.width;
+    const v = (clientY - rect.top) / rect.height;
+    const gx = clamp(Math.floor(u * grid.w), 0, grid.w - 1);
+    const gy = clamp(Math.floor(v * grid.h), 0, grid.h - 1);
+    const mm = grid.mm[gy * grid.w + gx];
+    return typeof mm === "number" ? mm : undefined;
+}
+
+function updateDepthTip(event) {
+    const tip = $("depth-tip");
+    const stage = $("stage");
+    if (!tip || !stage) return;
+
+    const mm = depthAt(event.clientX, event.clientY);
+    if (mm === undefined) { tip.hidden = true; return; }
+
+    tip.textContent = formatDepth(mm);
+    tip.classList.toggle("unknown", !(mm > 0));
+    tip.hidden = false;
+
+    // Positioned inside .stage, which clips (overflow: hidden), so the offsets are
+    // clamped to keep the tip on screen when the pointer is against an edge.
+    const box = stage.getBoundingClientRect();
+    tip.style.left = clamp(event.clientX - box.left, 4, Math.max(4, box.width - 100)) + "px";
+    tip.style.top = clamp(event.clientY - box.top, 18, Math.max(18, box.height - 18)) + "px";
+}
+
+function hideDepthTip() {
+    const tip = $("depth-tip");
+    if (tip) tip.hidden = true;
+}
+
+function bindDepthReadout() {
+    const stage = $("stage");
+    if (!stage) return;
+    // pointermove, not mousemove: the same handler then covers touch and pen.
+    stage.addEventListener("pointermove", updateDepthTip);
+    stage.addEventListener("pointerleave", hideDepthTip);
+    stage.addEventListener("pointercancel", hideDepthTip);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1167,6 +1276,7 @@ function setupManualControls() {
 applyLanguage(LANG, false);
 bindLangButtons();
 bindTuningButtons();
+bindDepthReadout();
 setupManualControls();
 
 pollState();
