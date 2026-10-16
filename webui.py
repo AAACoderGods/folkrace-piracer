@@ -987,6 +987,191 @@ function bindTuningButtons() {
     const saveBtn = $("btn-snippet");
     if (saveBtn) saveBtn.addEventListener("click", saveConfigToFile);
 }
+
+/* ------------------------------------------------------------------ *
+ * Manual drive helpers (previously missing, causing runtime errors)
+ * ------------------------------------------------------------------ */
+
+let holdTimer = null;
+let sendTimer = null;
+let lastFrameTime = performance.now();
+let armed = false;
+
+function releaseAll() {
+    for (const key of Object.keys(HELD)) HELD[key] = false;
+    AXIS.steering = 0;
+    AXIS.throttle = 0;
+    const manualControls = $("manual-controls");
+    if (manualControls) manualControls.classList.add("off");
+}
+
+function cancelHold() {
+    if (holdTimer !== null) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+    }
+    const armBtn = $("btn-arm");
+    if (armBtn) armBtn.classList.remove("holding");
+    const fill = armBtn ? armBtn.querySelector(".fill") : null;
+    if (fill) fill.style.width = "0";
+}
+
+function startSending() {
+    if (sendTimer !== null) return;
+    sendTimer = setInterval(sendDriveCommand, SEND_INTERVAL_MS);
+}
+
+function stopSending() {
+    if (sendTimer !== null) {
+        clearInterval(sendTimer);
+        sendTimer = null;
+    }
+}
+
+function syncInputs() {
+    // Called after state poll to make sure all tuning inputs reflect current values.
+    // This function is intentionally kept separate because the DOM may contain
+    // dynamically generated inputs after buildGroups.
+    if (!groupsBuilt) return;
+    for (const el of document.querySelectorAll("[data-key]")) {
+        const key = el.dataset.key;
+        if (key in STATE.params) {
+            el.value = STATE.params[key];
+        }
+    }
+}
+
+async function sendDriveCommand() {
+    if (!armed || STATE.mode !== "manual") return;
+    await postJSON("/api/manual", {
+        steering: AXIS.steering,
+        throttle: AXIS.throttle
+    });
+}
+
+function updateAxis(now) {
+    const dt = Math.min((now - lastFrameTime) / 1000, MAX_FRAME_DT);
+    lastFrameTime = now;
+
+    // Steering
+    const steerTarget = (HELD.d ? 1 : 0) - (HELD.a ? 1 : 0);
+    const steerRate = steerTarget === 0 ? STEER_RETURN : STEER_RATE;
+    AXIS.steering = approach(AXIS.steering, steerTarget, steerRate * dt);
+
+    // Throttle
+    const throttleTarget = (HELD.w ? 1 : 0) - (HELD.s ? 1 : 0);
+    const activeRate = HELD.w || HELD.s ? THROTTLE_RISE : THROTTLE_FALL;
+    AXIS.throttle = approach(AXIS.throttle, throttleTarget, activeRate * dt);
+}
+
+function animationLoop(now) {
+    if (STATE.mode === "manual" && armed) {
+        updateAxis(now);
+        const steerEl = $("dash-steer");
+        const thrEl = $("dash-thr");
+        if (steerEl) steerEl.textContent = signed(AXIS.steering);
+        if (thrEl) thrEl.textContent = signed(AXIS.throttle);
+        const needle = $("needle-steer");
+        if (needle) {
+            const pct = (AXIS.steering + 1) / 2 * 100;
+            needle.style.left = pct + "%";
+            needle.classList.toggle("wide", Math.abs(AXIS.steering) > 0.7);
+        }
+        const fill = $("fill-thr");
+        if (fill) {
+            const pct = Math.abs(AXIS.throttle) * 100;
+            fill.style.height = pct + "%";
+            fill.classList.toggle("reverse", AXIS.throttle < 0);
+        }
+    }
+    requestAnimationFrame(animationLoop);
+}
+
+function setKey(el, key, down) {
+    if (!(key in HELD)) return;
+    if (HELD[key] === down) return;
+    HELD[key] = down;
+    if (el) el.classList.toggle("held", down);
+}
+
+function setupManualControls() {
+    // Keyboard
+    document.addEventListener("keydown", (e) => {
+        if (e.repeat) return;
+        const key = e.key.toLowerCase();
+        if (key === "w" || key === "a" || key === "s" || key === "d") {
+            setKey($('pad-btn[data-key="' + key + '"]'), key, true);
+            e.preventDefault();
+        } else if (e.code === "Space") {
+            postJSON("/api/manual", { action: "stop" });
+            e.preventDefault();
+        } else if (key === "m" && !e.repeat) {
+            postJSON("/api/manual", { action: "arm" });
+            e.preventDefault();
+        }
+    });
+
+    document.addEventListener("keyup", (e) => {
+        const key = e.key.toLowerCase();
+        if (key in HELD) {
+            setKey($('pad-btn[data-key="' + key + '"]'), key, false);
+            e.preventDefault();
+        }
+    });
+
+    // On-screen pad
+    for (const btn of document.querySelectorAll(".pad-btn")) {
+        const key = btn.dataset.key;
+        btn.addEventListener("pointerdown", () => setKey(btn, key, true));
+        btn.addEventListener("pointerup", () => setKey(btn, key, false));
+        btn.addEventListener("pointercancel", () => setKey(btn, key, false));
+        btn.addEventListener("pointerleave", () => setKey(btn, key, false));
+    }
+
+    // ARM button hold-to-arm
+    const armBtn = $("btn-arm");
+    if (armBtn) {
+        armBtn.addEventListener("pointerdown", () => {
+            if (STATE.mode !== "paused") return;
+            holdTimer = setTimeout(async () => {
+                holdTimer = null;
+                const { data } = await postJSON("/api/manual", { action: "arm" });
+                if (data && data.ok) {
+                    armed = true;
+                    stopSending();   // restart interval cleanly
+                    startSending();
+                    statusLine("manual-status", t("status.armed"), "good");
+                } else {
+                    statusLine("manual-status", t("status.arm_failed") + ((data && data.error) || t("common.no_response")), "bad");
+                }
+            }, ARM_HOLD_MS);
+            armBtn.classList.add("holding");
+        });
+        armBtn.addEventListener("pointerup", cancelHold);
+        armBtn.addEventListener("pointercancel", cancelHold);
+    }
+
+    // Start autonomous and stop buttons
+    const startBtn = $("btn-start");
+    if (startBtn) startBtn.addEventListener("click", async () => {
+        const { data } = await postJSON("/api/manual", { action: "start" });
+        statusLine("manual-status", data && data.ok ? t("status.autonomous") : t("status.start_failed") + ((data && data.error) || t("common.no_response")), data && data.ok ? "good" : "bad");
+    });
+    const stopBtn = $("btn-stop");
+    if (stopBtn) stopBtn.addEventListener("click", async () => {
+        await postJSON("/api/manual", { action: "stop" });
+        statusLine("manual-status", t("status.stopped"), "good");
+    });
+}
+
+applyLanguage(LANG, false);
+bindLangButtons();
+bindTuningButtons();
+setupManualControls();
+
+pollState();
+setInterval(pollState, 1000);
+requestAnimationFrame(animationLoop);
 </script>
 </body>
 </html>
