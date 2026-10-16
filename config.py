@@ -66,13 +66,20 @@ class DepthCameraConfig:
     # needs no vendor library -- which is also why this backend is the default.
     # Enumerate what the Pi actually sees with:
     #     v4l2-ctl --list-devices
-    #     v4l2-ctl -d /dev/video2 --list-formats-ext
-    # and put the depth-capable node (not the RGB one, if the camera exposes both)
-    # in uvc_device.
+    #     v4l2-ctl -d /dev/video1 --list-formats-ext
+    # and put the *capture* node of the depth camera (not its metadata node, and
+    # never the CSI camera) in uvc_device.
+    #
+    # The DECXIN enumerates as a pair of nodes plus a media node:
+    #     /dev/video1   -> the UVC capture interface, this is the one that streams
+    #     /dev/video2   -> the metadata node for video1, never returns a frame
+    #     /dev/media5   -> media controller, not opened directly
+    # Note that /dev/video0 on this car is the CSI camera (unicam, the picamera2
+    # one); pointing this setting at video0 would fight the main camera instead.
     # ------------------------------------------------------------------
 
     # V4L2 device node, or a bare OpenCV index like "0".
-    uvc_device: str = "/dev/video2"
+    uvc_device: str = "/dev/video1"
 
     # Pixel format requested from the device. "Z16 " / "Y16 " are the 16-bit
     # depth formats a UVC depth camera normally exposes; the trailing space is
