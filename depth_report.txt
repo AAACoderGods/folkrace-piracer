@@ -1,0 +1,787 @@
+====================================================================
+ PiRacer Pro 深度相机诊断 (DECXIN-SM-2930V1)
+====================================================================
+Python 3.13.5 | numpy: 有 | cv2: 有
+
+====================================================================
+ 1/4  USB 设备枚举
+====================================================================
+Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 001 Device 002: ID 2109:3431 VIA Labs, Inc. Hub
+Bus 001 Device 003: ID 1bcf:2d4f Sunplus Innovation Technology Inc. DECXIN Camera
+Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+
+看什么：上面每一行是一个 USB 设备。
+  - 出现新的一行（尤其带 Camera / Webcam / 厂商名），说明 USB 层认到了。
+  - 完全没有新增行，就是硬件层问题：
+    换数据线、换 USB 口、确认没和 Pi 供电口搞混、看相机指示灯。
+
+====================================================================
+ 2/4  /dev/video* 设备节点
+====================================================================
+  /dev/video0
+  /dev/video1
+  /dev/video10
+  /dev/video11
+  /dev/video12
+  /dev/video13
+  /dev/video14
+  /dev/video15
+  /dev/video16
+  /dev/video18
+  /dev/video19
+  /dev/video2
+  /dev/video20
+  /dev/video21
+  /dev/video22
+  /dev/video23
+  /dev/video31
+
+看什么：同时提供 RGB 和深度的相机通常生成两个节点，
+比如 video0 是 RGB、video2 是深度。
+
+====================================================================
+ 3/4  每个节点支持的像素格式
+====================================================================
+--- v4l2-ctl --list-devices ---
+bcm2835-codec-decode (platform:bcm2835-codec):
+	/dev/video10
+	/dev/video11
+	/dev/video12
+	/dev/video18
+	/dev/video31
+
+bcm2835-isp (platform:bcm2835-isp):
+	/dev/video13
+	/dev/video14
+	/dev/video15
+	/dev/video16
+	/dev/video20
+	/dev/video21
+	/dev/video22
+	/dev/video23
+	/dev/media2
+	/dev/media3
+
+unicam (platform:fe801000.csi):
+	/dev/video0
+	/dev/media0
+
+rpi-hevc-dec (platform:rpi-hevc-dec):
+	/dev/video19
+	/dev/media1
+
+DECXIN Camera: DECXIN Camera (usb-0000:01:00.0-1.1):
+	/dev/video1
+	/dev/video2
+	/dev/media5
+
+bcm2835-codec (vchiq:bcm2835-codec):
+	/dev/media4
+
+--- /dev/video0 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+	[0]: 'YUYV' (YUYV 4:2:2)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[1]: 'UYVY' (UYVY 4:2:2)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[2]: 'YVYU' (YVYU 4:2:2)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[3]: 'VYUY' (VYUY 4:2:2)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[4]: 'RGBP' (16-bit RGB 5-6-5)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[5]: 'RGBR' (16-bit RGB 5-6-5 BE)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[6]: 'RGBO' (16-bit A/XRGB 1-5-5-5)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[7]: 'RGBQ' (16-bit A/XRGB 1-5-5-5 BE)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[8]: 'RGB3' (24-bit RGB 8-8-8)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[9]: 'BGR3' (24-bit BGR 8-8-8)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[10]: 'RGB4' (32-bit A/XRGB 8-8-8-8)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[11]: 'BA81' (8-bit Bayer BGBG/GRGR)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[12]: 'GBRG' (8-bit Bayer GBGB/RGRG)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[13]: 'GRBG' (8-bit Bayer GRGR/BGBG)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[14]: 'RGGB' (8-bit Bayer RGRG/GBGB)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[15]: 'pBAA' (10-bit Bayer BGBG/GRGR Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[16]: 'BG10' (10-bit Bayer BGBG/GRGR)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[17]: 'pGAA' (10-bit Bayer GBGB/RGRG Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[18]: 'GB10' (10-bit Bayer GBGB/RGRG)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[19]: 'pgAA' (10-bit Bayer GRGR/BGBG Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[20]: 'BA10' (10-bit Bayer GRGR/BGBG)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[21]: 'pRAA' (10-bit Bayer RGRG/GBGB Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[22]: 'RG10' (10-bit Bayer RGRG/GBGB)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[23]: 'pBCC' (12-bit Bayer BGBG/GRGR Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[24]: 'BG12' (12-bit Bayer BGBG/GRGR)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[25]: 'pGCC' (12-bit Bayer GBGB/RGRG Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[26]: 'GB12' (12-bit Bayer GBGB/RGRG)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[27]: 'pgCC' (12-bit Bayer GRGR/BGBG Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[28]: 'BA12' (12-bit Bayer GRGR/BGBG)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[29]: 'pRCC' (12-bit Bayer RGRG/GBGB Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[30]: 'RG12' (12-bit Bayer RGRG/GBGB)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[31]: 'pBEE' (14-bit Bayer BGBG/GRGR Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[32]: 'BG14' (14-bit Bayer BGBG/GRGR)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[33]: 'pGEE' (14-bit Bayer GBGB/RGRG Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[34]: 'GB14' (14-bit Bayer GBGB/RGRG)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[35]: 'pgEE' (14-bit Bayer GRGR/BGBG Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[36]: 'GR14' (14-bit Bayer GRGR/BGBG)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[37]: 'pREE' (14-bit Bayer RGRG/GBGB Packed)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[38]: 'RG14' (14-bit Bayer RGRG/GBGB)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[39]: 'BYR2' (16-bit Bayer BGBG/GRGR)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[40]: 'GB16' (16-bit Bayer GBGB/RGRG)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[41]: 'GR16' (16-bit Bayer GRGR/BGBG)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[42]: 'RG16' (16-bit Bayer RGRG/GBGB)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[43]: 'GREY' (8-bit Greyscale)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[44]: 'Y10P' (10-bit Greyscale (MIPI Packed))
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[45]: 'Y10 ' (10-bit Greyscale)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[46]: 'Y12P' (12-bit Greyscale (MIPI Packed))
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[47]: 'Y12 ' (12-bit Greyscale)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[48]: 'Y14P' (14-bit Greyscale (MIPI Packed))
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[49]: 'Y14 ' (14-bit Greyscale)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+	[50]: 'Y16 ' (16-bit Greyscale)
+		Size: Stepwise 16x16 - 16376x16376 with step 1/1
+
+--- /dev/video1 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+	[0]: 'MJPG' (Motion-JPEG, compressed)
+		Size: Discrete 1600x600
+			Interval: Discrete 0.033s (30.000 fps)
+		Size: Discrete 2560x960
+			Interval: Discrete 0.033s (30.000 fps)
+		Size: Discrete 3840x1080
+			Interval: Discrete 0.033s (30.000 fps)
+		Size: Discrete 2560x1080
+			Interval: Discrete 0.033s (30.000 fps)
+		Size: Discrete 1280x480
+			Interval: Discrete 0.033s (30.000 fps)
+		Size: Discrete 640x240
+			Interval: Discrete 0.033s (30.000 fps)
+		Size: Discrete 2560x720
+			Interval: Discrete 0.033s (30.000 fps)
+	[1]: 'YUYV' (YUYV 4:2:2)
+		Size: Discrete 1600x600
+			Interval: Discrete 1.000s (1.000 fps)
+		Size: Discrete 2560x960
+			Interval: Discrete 1.000s (1.000 fps)
+		Size: Discrete 3840x1080
+			Interval: Discrete 1.000s (1.000 fps)
+		Size: Discrete 2560x1080
+			Interval: Discrete 1.000s (1.000 fps)
+		Size: Discrete 1280x480
+			Interval: Discrete 0.100s (10.000 fps)
+		Size: Discrete 640x240
+			Interval: Discrete 0.050s (20.000 fps)
+		Size: Discrete 2560x720
+			Interval: Discrete 0.200s (5.000 fps)
+			Interval: Discrete 0.333s (3.000 fps)
+
+--- /dev/video10 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture Multiplanar
+
+	[0]: 'YU12' (Planar YUV 4:2:0)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[1]: 'YV12' (Planar YVU 4:2:0)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[2]: 'NV12' (Y/UV 4:2:0)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[3]: 'NV21' (Y/VU 4:2:0)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[4]: 'NC12' (Y/CbCr 4:2:0 (128b cols))
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[5]: 'RGBP' (16-bit RGB 5-6-5)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[6]: 'AB24' (32-bit RGBA 8-8-8-8)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[7]: 'BGR4' (32-bit BGRA/X 8-8-8-8)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2[video4linux2,v4l2 @ 0xbc53a10] ioctl(VIDIOC_STREAMON): Invalid argument
+[ WARN:0@2.271] global cap_ffmpeg_impl.hpp:1915 retrieveFrame Unknown/unsupported picture format: yuyv422, will be treated as 8UC1.
+ioctl(VIDIOC_QBUF): Bad file descriptor
+[ WARN:0@2.277] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[video4linux2,v4l2 @ 0xbc53a10] Not a video capture device.
+[ WARN:0@2.277] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[video4linux2,v4l2 @ 0xbc53a10] Not a video capture device.
+[ WARN:0@2.278] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[video4linux2,v4l2 @ 0xbc53a10] Not a video capture device.
+[ WARN:0@2.278] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[video4linux2,v4l2 @ 0xbc53a10] Not a video capture device.
+[ WARN:0@12.293] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video14): select() timeout.
+[video4linux2,v4l2 @ 0xbc53a10] ioctl(VIDIOC_G_INPUT): Inappropriate ioctl for device
+[ WARN:0@22.317] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video14): select() timeout.
+[ WARN:0@32.338] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video15): select() timeout.
+[video4linux2,v4l2 @ 0xbc53a10] ioctl(VIDIOC_G_INPUT): Inappropriate ioctl for device
+[ WARN:0@42.360] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video15): select() timeout.
+[ WARN:0@42.363] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[video4linux2,v4l2 @ 0xbc53a10] Not a video capture device.
+[ WARN:0@42.364] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[video4linux2,v4l2 @ 0xbc53a10] Not a video capture device.
+[ WARN:0@42.365] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[video4linux2,v4l2 @ 0xbc53a10] Not a video capture device.
+[ WARN:0@42.367] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[video4linux2,v4l2 @ 0xbc53a10] ioctl(VIDIOC_G_INPUT): Inappropriate ioctl for device
+[ WARN:0@42.367] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+
+
+--- /dev/video11 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture Multiplanar
+
+	[0]: 'H264' (H.264, compressed)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[1]: 'MJPG' (Motion-JPEG, compressed)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+
+--- /dev/video12 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture Multiplanar
+
+	[0]: 'YUYV' (YUYV 4:2:2)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[1]: 'YVYU' (YVYU 4:2:2)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[2]: 'VYUY' (VYUY 4:2:2)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[3]: 'UYVY' (UYVY 4:2:2)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[4]: 'YU12' (Planar YUV 4:2:0)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[5]: 'YV12' (Planar YVU 4:2:0)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[6]: 'RGB3' (24-bit RGB 8-8-8)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[7]: 'BGR3' (24-bit BGR 8-8-8)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[8]: 'AB24' (32-bit RGBA 8-8-8-8)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[9]: 'BGR4' (32-bit BGRA/X 8-8-8-8)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[10]: 'RGBP' (16-bit RGB 5-6-5)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[11]: 'NC12' (Y/CbCr 4:2:0 (128b cols))
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[12]: 'NV12' (Y/UV 4:2:0)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+	[13]: 'NV21' (Y/VU 4:2:0)
+		Size: Stepwise 32x32 - 16384x16384 with step 2/2
+
+--- /dev/video13 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+--- /dev/video14 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+	[0]: 'YUYV' (YUYV 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[1]: 'YVYU' (YVYU 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[2]: 'VYUY' (VYUY 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[3]: 'UYVY' (UYVY 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[4]: 'YU12' (Planar YUV 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[5]: 'YV12' (Planar YVU 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[6]: 'RGB3' (24-bit RGB 8-8-8)
+		Size: Stepwise 64x64 - 16384x16384 with step 1/1
+	[7]: 'BGR3' (24-bit BGR 8-8-8)
+		Size: Stepwise 64x64 - 16384x16384 with step 1/1
+	[8]: 'XB24' (32-bit RGBX 8-8-8-8)
+		Size: Stepwise 64x64 - 16384x16384 with step 1/1
+	[9]: 'XR24' (32-bit BGRX 8-8-8-8)
+		Size: Stepwise 64x64 - 16384x16384 with step 1/1
+	[10]: 'RGBP' (16-bit RGB 5-6-5)
+		Size: Stepwise 64x64 - 16384x16384 with step 1/1
+	[11]: 'NV12' (Y/UV 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[12]: 'NV21' (Y/VU 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+
+--- /dev/video15 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+	[0]: 'YUYV' (YUYV 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[1]: 'YVYU' (YVYU 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[2]: 'VYUY' (VYUY 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[3]: 'UYVY' (UYVY 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[4]: 'YU12' (Planar YUV 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[5]: 'YV12' (Planar YVU 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[6]: 'NV12' (Y/UV 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[7]: 'NV21' (Y/VU 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+
+--- /dev/video16 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+--- /dev/video18 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture Multiplanar
+
+	[0]: 'YU12' (Planar YUV 4:2:0)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[1]: 'NC12' (Y/CbCr 4:2:0 (128b cols))
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[2]: 'AB24' (32-bit RGBA 8-8-8-8)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+	[3]: 'RGBP' (16-bit RGB 5-6-5)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+
+--- /dev/video19 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture Multiplanar
+
+	[0]: 'Nc12' (Y/CbCr 4:2:0 (128b cols))
+	[1]: 'Nc30' (10-bit Y/CbCr 4:2:0 (128b cols))
+	[2]: 'NC12' (Y/CbCr 4:2:0 (128b cols))
+	[3]: 'NC30' (10-bit Y/CbCr 4:2:0 (128b cols))
+
+--- /dev/video2 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+--- /dev/video20 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+--- /dev/video21 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+	[0]: 'YUYV' (YUYV 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[1]: 'YVYU' (YVYU 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[2]: 'VYUY' (VYUY 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[3]: 'UYVY' (UYVY 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[4]: 'YU12' (Planar YUV 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[5]: 'YV12' (Planar YVU 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[6]: 'RGB3' (24-bit RGB 8-8-8)
+		Size: Stepwise 64x64 - 16384x16384 with step 1/1
+	[7]: 'BGR3' (24-bit BGR 8-8-8)
+		Size: Stepwise 64x64 - 16384x16384 with step 1/1
+	[8]: 'XB24' (32-bit RGBX 8-8-8-8)
+		Size: Stepwise 64x64 - 16384x16384 with step 1/1
+	[9]: 'XR24' (32-bit BGRX 8-8-8-8)
+		Size: Stepwise 64x64 - 16384x16384 with step 1/1
+	[10]: 'RGBP' (16-bit RGB 5-6-5)
+		Size: Stepwise 64x64 - 16384x16384 with step 1/1
+	[11]: 'NV12' (Y/UV 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[12]: 'NV21' (Y/VU 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+
+--- /dev/video22 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+	[0]: 'YUYV' (YUYV 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[1]: 'YVYU' (YVYU 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[2]: 'VYUY' (VYUY 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[3]: 'UYVY' (UYVY 4:2:2)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[4]: 'YU12' (Planar YUV 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[5]: 'YV12' (Planar YVU 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[6]: 'NV12' (Y/UV 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+	[7]: 'NV21' (Y/VU 4:2:0)
+		Size: Stepwise 64x64 - 16384x16384 with step 2/2
+
+--- /dev/video23 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture
+
+--- /dev/video31 的格式列表 ---
+ioctl: VIDIOC_ENUM_FMT
+	Type: Video Capture Multiplanar
+
+	[0]: 'JPEG' (JFIF JPEG, compressed)
+		Size: Stepwise 32x32 - 1920x1920 with step 2/2
+
+这是最关键的一步。重点找 16 位深度格式：
+  'Z16 ' / 'Y16 ' / 'Y12 ' / 'Z12 '  —— 带空格的 4 字符码
+  或描述里带 Depth / 16-bit / TOF 的条目
+
+若所有节点只有 YUYV / MJPG / H264 这类 8 位格式，
+说明这块相机没有通过 UVC 暴露深度流 —— 那就要走厂商 SDK。
+
+====================================================================
+ 4/4  OpenCV 实际读取
+====================================================================
+OpenCV 版本: 5.0.0
+
+--- 4a) 默认方式逐节点读取 ---
+  节点 /dev/video0
+    CAP_V4L2: 打开了但读不出帧
+    CAP_ANY: 打不开
+  节点 /dev/video1
+    CAP_V4L2: shape=(240, 640, 2) dtype=uint8 中心像素=[201  83]
+         uint8 双通道 ==> 16 位原始数据，可 view 成 uint16，是深度。
+    CAP_ANY: shape=(240, 640) dtype=uint8 中心像素=199
+         8 位单通道灰度 ==> 不是 16 位深度。
+  节点 /dev/video10
+    CAP_V4L2: 打不开
+    CAP_ANY: 打不开
+  节点 /dev/video11
+    CAP_V4L2: 打不开
+    CAP_ANY: 打不开
+  节点 /dev/video12
+    CAP_V4L2: 打不开
+    CAP_ANY: 打不开
+  节点 /dev/video13
+    CAP_V4L2: 打不开
+    CAP_ANY: 打不开
+  节点 /dev/video14
+    CAP_V4L2: 打开了但读不出帧
+    CAP_ANY: 打开了但读不出帧
+  节点 /dev/video15
+    CAP_V4L2: 打开了但读不出帧
+    CAP_ANY: 打开了但读不出帧
+  节点 /dev/video16
+    CAP_V4L2: 打不开
+    CAP_ANY: 打不开
+  节点 /dev/video18
+    CAP_V4L2: 打不开
+    CAP_ANY: 打不开
+  节点 /dev/video19
+    CAP_V4L2: 打不开
+    CAP_ANY: 打不开
+  节点 /dev/video2
+    CAP_V4L2: 打不开
+    CAP_ANY: 打不开
+  节点 /dev/video20
+    CAP_V4L2: 打不开[video4linux2,v4l2 @ 0xbc53a10] Not a video capture device.
+[ WARN:0@52.388] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video21): select() timeout.
+[video4linux2,v4l2 @ 0xbc53a10] ioctl(VIDIOC_G_INPUT): Inappropriate ioctl for device
+[ WARN:0@62.411] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video21): select() timeout.
+[ WARN:0@72.432] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video22): select() timeout.
+[video4linux2,v4l2 @ 0xbc53a10] ioctl(VIDIOC_G_INPUT): Inappropriate ioctl for device
+[ WARN:0@82.455] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video22): select() timeout.
+[ WARN:0@82.459] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[video4linux2,v4l2 @ 0xbc53a10] Not a video capture device.
+[ WARN:0@82.460] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[video4linux2,v4l2 @ 0xbc53a10] Not a video capture device.
+[ WARN:0@82.461] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@82.462] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@82.462] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@82.462] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@82.462] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@82.462] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.242] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.242] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.242] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.242] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.243] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.243] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.243] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.243] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.243] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.244] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.244] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.244] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.244] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.244] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.245] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.245] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.245] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.245] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.245] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.245] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.245] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.246] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.246] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@90.246] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@100.277] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video14): select() timeout.
+[ WARN:0@110.317] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video14): select() timeout.
+[ WARN:0@120.344] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video14): select() timeout.
+[ WARN:0@130.379] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video14): select() timeout.
+[ WARN:0@140.415] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video14): select() timeout.
+[ WARN:0@150.448] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video14): select() timeout.
+[ WARN:0@160.486] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video15): select() timeout.
+[ WARN:0@170.518] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video15): select() timeout.
+[ WARN:0@180.548] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video15): select() timeout.
+[ WARN:0@190.576] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video15): select() timeout.
+[ WARN:0@200.604] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video15): select() timeout.
+[ WARN:0@210.635] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video15): select() timeout.
+[ WARN:0@210.639] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.639] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.639] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.639] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.640] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.640] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.640] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.640] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.640] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.640] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.641] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.641] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.641] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.641] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.641] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.642] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.642] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.642] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.642] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.642] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.642] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.643] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.643] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.643] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.643] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.643] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.643] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.643] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.644] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@210.644] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@220.677] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video21): select() timeout.
+[ WARN:0@230.713] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video21): select() timeout.
+[ WARN:0@240.748] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video21): select() timeout.
+[ WARN:0@250.784] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video21): select() timeout.
+[ WARN:0@260.823] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video21): select() timeout.
+[ WARN:0@270.856] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video21): select() timeout.
+[ WARN:0@280.887] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video22): select() timeout.
+[ WARN:0@290.918] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video22): select() timeout.
+[ WARN:0@300.948] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video22): select() timeout.
+[ WARN:0@310.976] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video22): select() timeout.
+[ WARN:0@321.006] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video22): select() timeout.
+[ WARN:0@331.032] global cap_v4l.cpp:1049 tryIoctl VIDEOIO(V4L2:/dev/video22): select() timeout.
+[ WARN:0@331.036] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.036] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.036] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.036] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.036] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.036] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.037] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.037] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.037] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.037] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.037] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+[ WARN:0@331.037] global cap.cpp:212 open VIDEOIO(V4L2): backend is generally available but can't be used to capture by name
+
+    CAP_ANY: 打不开
+  节点 /dev/video21
+    CAP_V4L2: 打开了但读不出帧
+    CAP_ANY: 打开了但读不出帧
+  节点 /dev/video22
+    CAP_V4L2: 打开了但读不出帧
+    CAP_ANY: 打开了但读不出帧
+  节点 /dev/video23
+    CAP_V4L2: 打不开
+    CAP_ANY: 打不开
+  节点 /dev/video31
+    CAP_V4L2: 打不开
+    CAP_ANY: 打不开
+
+--- 4b) 指定 fourcc 逐个尝试 ---
+  节点 /dev/video0
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video1
+    fourcc='Z16 ' -> OK  shape=(240, 640, 2) dtype=uint8 中心像素=[176 126]
+         uint8 双通道 ==> 16 位原始数据，可 view 成 uint16，是深度。
+    fourcc='Y16 ' -> OK  shape=(240, 640, 2) dtype=uint8 中心像素=[201  81]
+         uint8 双通道 ==> 16 位原始数据，可 view 成 uint16，是深度。
+    fourcc='Y12 ' -> OK  shape=(240, 640, 2) dtype=uint8 中心像素=[190 108]
+         uint8 双通道 ==> 16 位原始数据，可 view 成 uint16，是深度。
+    fourcc='Z12 ' -> OK  shape=(240, 640, 2) dtype=uint8 中心像素=[191 104]
+         uint8 双通道 ==> 16 位原始数据，可 view 成 uint16，是深度。
+    fourcc='GREY' -> OK  shape=(240, 640, 2) dtype=uint8 中心像素=[200  78]
+         uint8 双通道 ==> 16 位原始数据，可 view 成 uint16，是深度。
+    fourcc='YUYV' -> OK  shape=(240, 640, 2) dtype=uint8 中心像素=[203  93]
+         uint8 双通道 ==> 16 位原始数据，可 view 成 uint16，是深度。
+  节点 /dev/video10
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video11
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video12
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video13
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video14
+    fourcc='Z16 ' -> 读不到帧
+    fourcc='Y16 ' -> 读不到帧
+    fourcc='Y12 ' -> 读不到帧
+    fourcc='Z12 ' -> 读不到帧
+    fourcc='GREY' -> 读不到帧
+    fourcc='YUYV' -> 读不到帧
+  节点 /dev/video15
+    fourcc='Z16 ' -> 读不到帧
+    fourcc='Y16 ' -> 读不到帧
+    fourcc='Y12 ' -> 读不到帧
+    fourcc='Z12 ' -> 读不到帧
+    fourcc='GREY' -> 读不到帧
+    fourcc='YUYV' -> 读不到帧
+  节点 /dev/video16
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video18
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video19
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video2
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video20
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video21
+    fourcc='Z16 ' -> 读不到帧
+    fourcc='Y16 ' -> 读不到帧
+    fourcc='Y12 ' -> 读不到帧
+    fourcc='Z12 ' -> 读不到帧
+    fourcc='GREY' -> 读不到帧
+    fourcc='YUYV' -> 读不到帧
+  节点 /dev/video22
+    fourcc='Z16 ' -> 读不到帧
+    fourcc='Y16 ' -> 读不到帧
+    fourcc='Y12 ' -> 读不到帧
+    fourcc='Z12 ' -> 读不到帧
+    fourcc='GREY' -> 读不到帧
+    fourcc='YUYV' -> 读不到帧
+  节点 /dev/video23
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+  节点 /dev/video31
+    fourcc='Z16 ' -> 节点打不开
+    fourcc='Y16 ' -> 节点打不开
+    fourcc='Y12 ' -> 节点打不开
+    fourcc='Z12 ' -> 节点打不开
+    fourcc='GREY' -> 节点打不开
+    fourcc='YUYV' -> 节点打不开
+
+
+====================================================================
+ 结论怎么读
+====================================================================
+  第 3 层有 'Z16 ' / 'Y16 '
+      -> 相机确实有 UVC 深度流。把那个节点名和 fourcc 填进
+         config.py 的 depth.uvc_device / depth.uvc_fourcc 即可。
+
+  第 4a 读到 uint16 或 (h,w,2)
+      -> 深度管线是通的，只是默认节点选错了，改 uvc_device。
+
+  第 4a 读到 8 位三通道
+      -> CONVERT_RGB=0 没生效；看第 4b 哪个 fourcc 能读回 uint16。
+
+  第 3 层全是 8 位格式
+      -> 这块相机不走 UVC 暴露深度，需要厂商 SDK；
+         请把 SDK 包名和读取一帧的示例代码发给我。
+
+  没有 /dev/video* 节点
+      -> 纯硬件/驱动问题，与代码无关。
