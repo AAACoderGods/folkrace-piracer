@@ -30,7 +30,7 @@ _STEREO_ASPECT_THRESHOLD = 2.2
 class Camera:
     """Wrapper around Picamera2 with fallback support."""
 
-    def __init__(self, width: int = 640, height: int = 460, framerate: int = 30,
+    def __init__(self, width: int = 1920, height: int = 1080, framerate: int = 30,
                  format: str = "RGB888", split_stereo_frame: str = "auto",
                  stereo_eye: str = "left"):
         self.width = width
