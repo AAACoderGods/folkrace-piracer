@@ -252,11 +252,18 @@ def main():
         format=config.camera.format,
         split_stereo_frame=resolve_split_mode(config),
         stereo_eye=config.camera.stereo_eye,
+        stereo_capture_width=config.camera.stereo_capture_width,
+        stereo_capture_height=config.camera.stereo_capture_height,
+        prefer_v4l2=config.camera.prefer_v4l2,
     )
     # Constructed only when the flag was passed. Without it the depth camera is
     # simply absent, which is the same shape as "constructed but fell back to mock
     # with no obstacle ever in range".
-    depth_camera = DepthCamera(config.depth) if config.depth.enable_depth else None
+    #
+    # frame_source=camera：stereo 后端从 camera.py 取未切割的双目原始帧，而不是
+    # 再打开一次同一块 UVC 设备。webui 显示的是 camera.py 切出来的单眼图，
+    # 距离计算用的是完整双目帧——同一时刻的同一帧，两边不冲突。
+    depth_camera = DepthCamera(config.depth, frame_source=camera) if config.depth.enable_depth else None
     depth_guard = DepthGuard(depth_camera, config.depth) if depth_camera is not None else None
     perception = RoadPerception(config.vision)
     vehicle = VehicleController(config.control)

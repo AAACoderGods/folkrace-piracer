@@ -39,9 +39,15 @@ Design rules, in order of importance:
    reading". CAP_PROP_FOURCC is the only thing that distinguishes them, so it
    is checked before any UVC buffer is interpreted as depth.
 
-5. The device node is discovered, not assumed. `v4l2-ctl --list-devices` numbers
-   nodes in USB enumeration order, which is not stable. Candidates are filtered
-   by their sysfs bus (USB only) and then verified by actually reading a frame.
+5. The UVC device is opened by at most one component. A dual-lens UVC camera
+   reports exactly one capture node, and libcamera (via Picamera2, in camera.py)
+   or the V4L2 handle Camera opened are already holding it for the vision stream.
+   Opening the same node a second time from here either fails outright -- which
+   shows up as "stereo fell back to mock" -- or, worse, succeeds and hands out
+   frames interleaved with vision's, so the "left" and "right" halves that
+   StereoBM receives come from different moments and the disparity map is pure
+   noise. The stereo backend therefore *shares* camera.py's raw frame through
+   `frame_source` and only opens the device itself when no such source exists.
 
 6. The UVC-based backends capture on a background thread. A live stereo frame
    costs tens of milliseconds to decode and match, and blocking the 30 Hz
@@ -157,14 +163,18 @@ class DepthCamera:
     Facade over the available depth backends, with a uniform frame interface.
 
     Usage mirrors Camera:
-        cam = DepthCamera(config.depth)
+        cam = DepthCamera(config.depth, frame_source=camera)
         cam.start()
         colour, depth = cam.capture_frame()   # depth is mm, 0 means "no reading"
         cam.stop()
     """
 
-    def __init__(self, config: DepthCameraConfig):
+    def __init__(self, config: DepthCameraConfig, frame_source=None):
         self.config = config
+        # Optional upstream frame provider (normally camera.Camera). Sharing the
+        # capture is the only way to run two views of one dual-lens UVC module --
+        # see design rule 5 at the top of this file.
+        self._frame_source = frame_source
         self.backend: str = "mock"
         self.is_running = False
         # Only one of these is ever live; stop() releases whichever is set.
@@ -185,6 +195,13 @@ class DepthCamera:
         self._stereo_stop_event: Optional[threading.Event] = None
         self._stereo_thread: Optional[threading.Thread] = None
         self._stereo_latest: Optional[np.ndarray] = None
+        # True when the stereo sampler pulls frames from frame_source instead of
+        # from self._uvc. Only affects which method the thread calls; the depth
+        # output is identical.
+        self._stereo_external = False
+        # One-shot diagnostic: report the first valid disparity map so the
+        # operator can confirm the pipeline is producing distance at all.
+        self._stereo_first_logged = False
         # Per-device scale factor from raw counts to metres. RealSense sets it
         # per model; 0.001 (i.e. 1 count = 1 mm) is the common default and the
         # value the mock backend reports, so it is a safe fallback if start()
@@ -300,6 +317,7 @@ class DepthCamera:
             self._stereo_thread.join(timeout=5.0)
             self._stereo_thread = None
         self._stereo_stop_event = None
+        self._stereo_external = False
         with self._stereo_lock:
             self._stereo_latest = None
 
@@ -417,14 +435,26 @@ class DepthCamera:
 
     def _start_stereo(self) -> bool:
         """
-        Bring up stereo capture on the first USB node that yields a frame.
+        Bring up stereo capture, preferring to share camera.py's raw frame.
 
-        Calibration is mandatory: without a scale, identical left/right images
-        produce a disparity of zero everywhere, which the range check reads as
-        "no obstacle". That is indistinguishable from a clear road, and it is the
-        one failure mode a forward guard must never have.
+        Order matters. camera.py normally owns the UVC device already (it is the
+        vision stream), and a second open of the same node would break both
+        consumers. So the shared source is tried first, and self-opening the
+        device is only a fallback for the case where the vision camera is a
+        separate piece of hardware (a CSI module plus a stand-alone stereo pair).
+
+        Calibration is mandatory in either path: without a scale, identical
+        left/right images produce a disparity of zero everywhere, which the range
+        check reads as "no obstacle". That is indistinguishable from a clear
+        road, and it is the one failure mode a forward guard must never have.
         """
         scale = self._stereo_effective_scale()
+        logging.info("Depth camera: stereo starting (scale=%.1f mm*px, "
+                     "source=%s, target %dx%d, %d disparities)",
+                     scale,
+                     "frame_source" if self._frame_source is not None else "(none)",
+                     self.config.stereo_width, self.config.stereo_height,
+                     self.config.stereo_num_disparities)
         if scale <= 0.0:
             logging.warning(
                 "Depth camera: stereo backend is NOT calibrated. Set "
@@ -448,25 +478,101 @@ class DepthCamera:
                 "stereo_num_disparities (currently %d) or check the scale.",
                 closest_mm, self.config.emergency_stop_mm, num_disp)
 
+        # 1) 共享 camera.py 的原始双目帧。这是主路径：同一块 UVC 双目设备只被
+        #    打开了一次，视差算的就是 vision 正在用的那帧。
+        if self._try_start_stereo_from_source(scale):
+            return True
+
+        # 2) 回退：自己打开设备。仅当 camera.py 走的是另一块相机（CSI）时才有
+        #    意义，或者 frame_source 还没产生帧。
         candidates = self._candidate_uvc_devices()
         for device in candidates:
             if self._open_stereo_device(device):
-                self._stereo_stop_event = threading.Event()
-                with self._stereo_lock:
-                    self._stereo_latest = None
-                self._stereo_thread = threading.Thread(
-                    target=self._stereo_sampler_loop,
-                    name="stereo-sampler", daemon=True)
-                self._stereo_thread.start()
-                logging.info("UVC stereo: using %s.", device)
+                self._stereo_external = False
+                self._uvc_device_in_use = device
+                self._launch_stereo_sampler()
+                logging.info("UVC stereo: 自己打开了 %s。", device)
                 return True
 
         logging.warning(
-            "Depth camera: no USB video node produced a usable stereo pair. "
-            "Tried: %s. Confirm the device with `v4l2-ctl --list-devices` and its "
-            "formats with `v4l2-ctl -d <node> --list-formats-ext`.",
+            "Depth camera: no USB video node produced a usable stereo pair, and no "
+            "shared frame source was available. Tried: %s. Confirm the device with "
+            "`v4l2-ctl --list-devices` and its formats with "
+            "`v4l2-ctl -d <node> --list-formats-ext`.",
             ", ".join(candidates) or "(none)")
         return False
+
+    def _try_start_stereo_from_source(self, scale: float) -> bool:
+        """
+        Try to use camera.py's raw frame as the stereo feed.
+
+        Returns False (without side effects) when this is not usable, so the
+        caller can fall back to opening the device itself.
+        """
+        source = self._frame_source
+        if source is None or not hasattr(source, "latest_stereo_frame"):
+            logging.info(
+                "Depth camera: 没有共享帧源（frame_source 缺失或未实现 "
+                "latest_stereo_frame），将尝试自己打开 UVC 设备。")
+            return False
+
+        # Camera.start() 刚结束时第一帧可能还没到，等一小会儿。
+        deadline = time.monotonic() + 2.0
+        frame = None
+        while time.monotonic() < deadline:
+            try:
+                frame = source.latest_stereo_frame()
+            except Exception as e:
+                logging.debug("stereo: 外部帧源读取失败: %s", e)
+                return False
+            if frame is not None:
+                break
+            time.sleep(0.05)
+
+        if frame is None:
+            logging.warning(
+                "Depth camera: 2 秒内没从 camera.py 拿到帧（latest_stereo_frame "
+                "返回 None）。多半是 V4L2 采集还没出第一帧，或者是静帧。"
+                "转为自开设备。")
+            return False
+
+        h, w = frame.shape[:2]
+        # 尺寸保护：如果 camera.py 给的是 640 宽（CSI 单眼、或没有按原生双目
+        # 尺寸采集），强行算视差只会得到垃圾数据。宁可不启动，也不要给错距离。
+        min_w = int(self.config.stereo_width * 0.9)
+        if w < min_w:
+            logging.warning(
+                "Depth camera: 从 camera.py 拿到的帧是 %dx%d，不是双目尺寸"
+                "（期望至少 %d 宽）。通常意味着 Camera 未按双目原始尺寸采集。"
+                "检查 main.py 是否在 depth backend='stereo' 时强制了 "
+                "split_stereo_frame='always'，且 config.camera.stereo_capture_width "
+                "与实际双目总宽一致。",
+                w, h, min_w)
+            return False
+
+        depth = self._stereo_frame_to_depth(frame, scale)
+        if depth is None:
+            logging.warning("Depth camera: 外部帧源给出的帧无法算出视差，转为自开设备。")
+            return False
+
+        self._stereo_external = True
+        self._uvc_device_in_use = f"camera.py 共享帧 ({w}x{h})"
+        self._launch_stereo_sampler()
+        logging.info(
+            "UVC stereo: 复用 camera.py 的双目帧（%dx%d），不再重复打开同一块设备。",
+            w, h)
+        return True
+
+    def _launch_stereo_sampler(self):
+        """Create the stop event and start the background depth thread."""
+        self._stereo_stop_event = threading.Event()
+        with self._stereo_lock:
+            self._stereo_latest = None
+        self._stereo_first_logged = False
+        self._stereo_thread = threading.Thread(
+            target=self._stereo_sampler_loop,
+            name="stereo-sampler", daemon=True)
+        self._stereo_thread.start()
 
     def _open_stereo_device(self, device: str) -> bool:
         """
@@ -485,10 +591,10 @@ class DepthCamera:
                 logging.debug("stereo: %s could not be opened.", device)
                 return False
 
-            # MJPG is what gives 30 fps at 1280x480 with tolerable USB bandwidth.
-            # YUYV is also listed, but only at 10 fps -- too slow for the guard.
+            # MJPG is what gives 30 fps at the native pair size with tolerable USB
+            # bandwidth. YUYV is also listed, but only at 10 fps -- too slow.
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.stereo_width)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.stereo_width * 2)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.stereo_height)
             cap.set(cv2.CAP_PROP_FPS, self.config.fps)
 
@@ -514,7 +620,6 @@ class DepthCamera:
             self._uvc_fourcc = _fourcc_str(cap.get(cv2.CAP_PROP_FOURCC))
             self._uvc = cap
             cap = None
-            self._uvc_device_in_use = device
             return True
         except Exception as e:
             logging.debug("stereo: opening %s raised %s", device, e)
@@ -539,7 +644,11 @@ class DepthCamera:
         if frame is None or not isinstance(frame, np.ndarray) or frame.ndim != 3:
             return None
         h, w = frame.shape[:2]
-        if w < 2 or w % 2 != 0 or h < 8:
+        # 奇数宽度来自某些模式下的 padding；裁掉一列即可，不必整帧丢弃。
+        if w % 2 != 0:
+            w -= 1
+            frame = frame[:, :w]
+        if w < 2 or h < 8:
             return None
 
         half = w // 2
@@ -584,26 +693,57 @@ class DepthCamera:
     def _stereo_sampler_loop(self):
         """Background sampler: keep the cached depth frame fresh."""
         scale = self._stereo_effective_scale()
-        period = 1.0 / max(1.0, float(self.config.fps))
+        # 与主循环的 30 Hz 解耦：StereoBM 在 1280x480x256 上一次要上百毫秒，
+        # 跑满 30 Hz 会吃掉一个核并拖慢 PID。10 Hz 对障碍检测足够。
+        fps = int(getattr(self.config, "stereo_target_fps", 15) or 15)
+        period = 1.0 / max(1.0, float(fps))
         event = self._stereo_stop_event
         if event is None:
             return
 
+        # 共享帧源时同一个数组会被反复喂进来；id 去重避免把同一帧算好几遍。
+        last_frame_id = None
+
         while not event.is_set():
             started = time.monotonic()
             depth = None
+            frame = None
             try:
-                with self._uvc_lock:
-                    cap = self._uvc
-                    if cap is None:
-                        break
-                    ok, frame = cap.read()
-                if ok and frame is not None:
-                    depth = self._stereo_frame_to_depth(frame, scale)
+                if self._stereo_external:
+                    frame = self._frame_source.latest_stereo_frame()
+                else:
+                    with self._uvc_lock:
+                        cap = self._uvc
+                        if cap is None:
+                            break
+                        ok, raw = cap.read()
+                    if ok and raw is not None:
+                        frame = raw
+                if frame is not None:
+                    frame_id = id(frame)
+                    if frame_id != last_frame_id:
+                        depth = self._stereo_frame_to_depth(frame, scale)
+                        last_frame_id = frame_id
+                    else:
+                        with self._stereo_lock:
+                            depth = self._stereo_latest
             except Exception as e:
                 logging.debug("stereo: sampler read failed: %s", e)
-            with self._stereo_lock:
-                self._stereo_latest = depth
+
+            if depth is not None:
+                with self._stereo_lock:
+                    self._stereo_latest = depth
+                if not self._stereo_first_logged:
+                    self._stereo_first_logged = True
+                    valid_ratio = float(np.count_nonzero(depth)) / float(depth.size)
+                    logging.info(
+                        "stereo: 首帧深度图就绪，有效像素 %.1f%%。若这数字很低，"
+                        "多半是 StereoBM 找不到匹配（场景太光滑 / 目标太远 / "
+                        "光照太暗），可先调大 stereo_block_size 或换一个纹理更丰富的场景。",
+                        valid_ratio * 100.0)
+            else:
+                with self._stereo_lock:
+                    self._stereo_latest = None
 
             elapsed = time.monotonic() - started
             remaining = period - elapsed

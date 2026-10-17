@@ -8,10 +8,13 @@ from dataclasses import dataclass, field
 
 @dataclass
 class CameraConfig:
-    # Camera resolution and framerate
-    # OV5647 native fast binned mode is 640x480 @ ~60fps
-    width: int = 640
-    height: int = 460
+    # 输出给 vision.py / webui 的分辨率（单眼）。
+    #
+    # 这个值要跟 stereo_capture_width / 2 实际能给出的单眼尺寸对得上，否则
+    # resize 会把有效信息压掉：1280 宽的单眼如果缩成 640 输出，画面自然会糊。
+    # 双目相机的上限是 stereo_capture_width / 2；再大的 width 只会是拉伸。
+    width: int = 1280
+    height: int = 480
     framerate: int = 30
     format: str = "RGB888"  # or 'BGR888'
 
@@ -32,11 +35,11 @@ class CameraConfig:
     #   "auto"    - split only when the frame's width/height >= 2.2, which is
     #               true of every DECXIN native mode and of nothing a single-lens
     #               webcam produces.
-    #   "always"  - split every frame in half. Needed when the capture path has
-    #               already rescaled the double-wide pair into a normal aspect
-    #               ratio before camera.py sees it, which defeats the "auto"
-    #               heuristic. main.py already forces this when the depth backend
-    #               is "stereo", because then the device is known to be dual-lens.
+    #   "always"  - split every frame in half, and ask the device for the full
+    #               stereo_capture_width x stereo_capture_height (below) instead
+    #               of the target width x height. main.py forces this whenever the
+    #               depth backend is "stereo", so the depth camera gets the
+    #               native, un-squashed pair through Camera.latest_stereo_frame().
     #   "never"   - leave the frame alone.
     split_stereo_frame: str = "auto"
     # Which half survives: "left" (the reference eye used by depth_camera.py) or
@@ -44,6 +47,30 @@ class CameraConfig:
     # same track -- but keeping it consistent avoids surprises when comparing a
     # frame against the depth pipeline.
     stereo_eye: str = "left"
+
+    # 拆分前的原始尺寸：左右两眼并排的总宽 / 单眼的高。
+    # 只有 split_stereo_frame="always" 时生效——此时 Camera 会以这个尺寸向设备
+    # 请求采集，并把未拆分帧共享给 depth_camera.py。
+    #
+    # DECXIN 支持的并排模式里，2560x960 是单眼分辨率最高的 4:3 选项（单眼
+    # 1280x480），也是 USB 带宽可接受的档位。3840x1080（单眼 1920x540）更清晰，
+    # 但 MJPG 30fps 已经接近 USB 2.0 上限，Pi 端解码也会明显更吃力，需要更强的
+    # 机器才跑得动。要更高请同时改 stereo_num_disparities（见下）。
+    #
+    # 改了这两项后，stereo_scale_mm_px 必须重新校准：视差里 focal 是按像素算的，
+    # 分辨率翻倍后同一块靶子在同一距离上给出的视差也翻倍，旧的 scale 会把距离
+    # 算成原来的一半。
+    stereo_capture_width: int = 2560
+    stereo_capture_height: int = 960
+
+    # 双目模式下走 V4L2 直连，绕过 Picamera2。
+    #
+    # Picamera2 会对 UVC 的 MJPG 流再做一层 ISP 处理（tone mapping / 缩放），
+    # 对一块只有 MJPG 的双目相机来说这是画质的主要损失来源；cv2.VideoCapture
+    # 走 V4L2 直读解码后的帧，明显更锐。只有在 split_stereo_frame="always"
+    # （即 main.py 已经确认这是一台双目相机）时才会启用，CSI 相机不受影响。
+    # 若直连失败，start() 会自动回退到 Picamera2。
+    prefer_v4l2: bool = True
 
 
 @dataclass
@@ -71,6 +98,10 @@ class DepthCameraConfig:
     #               anywhere), and encodes the two lenses as one double-wide
     #               side-by-side image. Depth is reconstructed on the host by
     #               stereo matching. REQUIRES CALIBRATION -- see below.
+    #               Main.py forces camera.split_stereo_frame="always" so that
+    #               Camera captures the native pair; depth_camera.py then reuses
+    #               Camera.latest_stereo_frame() instead of opening the device a
+    #               second time.
     #   decxin    - a UVC camera that really does list a 16-bit depth FOURCC
     #               (Z16/Y16/...). Not this hardware; kept for other cameras.
     #   realsense - Intel RealSense via pyrealsense2.
@@ -107,10 +138,8 @@ class DepthCameraConfig:
     # Stereo backend (DECXIN-SM-2930V1 and similar dual-lens UVC modules)
     #
     # The two lenses are interleaved in a single UVC frame: left eye = left
-    # half, right eye = right half. 1280x480 is picked from the device's format
-    # list because it gives each eye 640x480 (matching the rest of the pipeline)
-    # at 30 fps in MJPG. The other double-wide modes are 640x240 (@20fps YUYV),
-    # 2560x960, 3840x1080, 2560x1080, 2560x720 -- all larger, none faster.
+    # half, right eye = right half. The frame is shared with camera.py, so
+    # StereoBM works on the native, un-squashed pair.
     #
     # Disparity comes back as horizontal pixel shift; depth is then
     #     depth_mm = scale_mm_px / disparity_px
@@ -125,10 +154,16 @@ class DepthCameraConfig:
     # and copy the printed stereo_scale_mm_px into this file.
     # ------------------------------------------------------------------
 
-    # Total frame size (both eyes). Height is the eye height; width is halved
-    # to split the pair. 1280x480 -> 640x480 per eye.
+    # 单眼分辨率（深度计算用）。必须与 camera.stereo_capture_width / 2 相等，
+    # 否则 _try_start_stereo_from_source 会因为尺寸不匹配而拒绝共享帧。
+    # 640x480 的单眼对应 1280x480 的总尺寸；1280x480 单眼对应 2560x960 总尺寸。
     stereo_width: int = 1280
     stereo_height: int = 480
+
+    # 视差计算的频率上限。StereoBM 在 1280x480x256 上一次要上百毫秒，
+    # 跑满主循环的 30 Hz 会吃掉一个核并拖慢 PID。10 Hz 对前方障碍检测足够。
+    # 与 camera 的采集率解耦：camera 每帧更新原始帧，sampler 按这个频率取最新一帧。
+    stereo_target_fps: int = 10
 
     # Calibration, in mm * px. This is the ONE number to measure, and it is
     # exactly focal_px * baseline_mm. To get it:
@@ -137,12 +172,18 @@ class DepthCameraConfig:
     #   3. Read the disparity d at that target from the centre of a disparity
     #      frame (or run test_stereo_calib.py, which reads it for you).
     #   4. Set stereo_scale_mm_px = D * d.
+    #
+    # IMPORTANT: this value is tied to the eye resolution. If stereo_width /
+    # stereo_height (or camera.stereo_capture_width / height) changes, the same
+    # target at the same distance produces a different disparity and the scale
+    # MUST be re-measured. The current default assumes the eye is 1280x480.
+    #
     # A scale of 0 means "not calibrated": the stereo backend refuses to start
     # and falls back to mock. That is deliberate, not a bug.
     stereo_scale_mm_px: float = 0.0
 
     # Physical alternative to the measured scale: if the module's datasheet
-    # gives the lens focal length (pixels, at the width set above) and the
+    # gives the lens focal length (pixels, at the eye width set above) and the
     # baseline (distance between the lenses, mm), the product is the same
     # number. Only used when stereo_scale_mm_px is 0.
     stereo_focal_px: float = 0.0
@@ -152,11 +193,14 @@ class DepthCameraConfig:
     # num_disparities must be divisible by 16; it is the widest pixel shift the
     # matcher searches, so it sets the CLOSEST distance the guard can resolve:
     #     closest_mm = scale_mm_px / (num_disparities - 1)
+    # 1280x480 的单眼下 focal 是 640x480 的两倍；要维持同样近的盲区，
+    # num_disparities 也要一并翻倍到 256。代价是 StereoBM 变慢，所以把
+    # stereo_target_fps 降到 10 来平衡。
     # The backend warns at start if that is farther than emergency_stop_mm,
     # because obstacles inside the blind zone would never register. Raise this
     # if the warning fires.
     # block_size must be odd. Larger smooths noise but blurs thin obstacles.
-    stereo_num_disparities: int = 128
+    stereo_num_disparities: int = 256
     stereo_block_size: int = 15
 
     # ------------------------------------------------------------------
