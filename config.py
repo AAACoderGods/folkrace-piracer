@@ -33,16 +33,30 @@ class DepthCameraConfig:
     # Master switch. --allow-depth-camera is what normally flips this.
     enable_depth: bool = False
 
-    # Backend to use: "decxin" (UVC), "realsense", or "mock".
+    # Backend to use: "stereo", "decxin", "realsense", or "mock".
+    #
+    #   stereo    - DECXIN-SM-2930V1 and similar dual-lens UVC modules. The
+    #               device exposes only MJPG/YUYV colour (confirmed with
+    #               `v4l2-ctl -d /dev/video0 --list-formats-ext`: no Z16/Y16
+    #               anywhere), and encodes the two lenses as one double-wide
+    #               side-by-side image. Depth is reconstructed on the host by
+    #               stereo matching. REQUIRES CALIBRATION -- see below.
+    #   decxin    - a UVC camera that really does list a 16-bit depth FOURCC
+    #               (Z16/Y16/...). Not this hardware; kept for other cameras.
+    #   realsense - Intel RealSense via pyrealsense2.
+    #   mock      - synthesises a flat 3 m wall. The guard never fires, which
+    #               is the intended "no depth camera" fallback.
+    #
     # An unavailable backend always falls back to mock rather than raising, so a
     # missing library never takes the car off the track -- it just loses depth.
-    backend: str = "decxin"
+    backend: str = "stereo"
 
     # Device serial to open; empty means "the first one that answers".
     # Only the RealSense backend uses this.
     device_serial: str = ""
 
-    # Depth stream resolution and rate.
+    # Depth stream resolution and rate. For the stereo backend these size the
+    # *mock* fallback; the live stereo frame is sized by stereo_width/_height.
     width: int = 640
     height: int = 480
     fps: int = 30
@@ -50,8 +64,8 @@ class DepthCameraConfig:
     # How long to wait for a frame before giving up on this iteration, in ms.
     # Deliberately short: the depth guard runs inside the 30 Hz control loop, so
     # a stalled depth camera must not be allowed to hold the whole loop hostage.
-    # Only the RealSense backend uses it; OpenCV's blocking read is left as-is
-    # because a UVC device that stops answering is already returning empty frames.
+    # Only the RealSense backend uses it. The UVC-based backends (stereo, decxin)
+    # read on a background thread instead, so a slow frame cannot stall the loop.
     capture_timeout_ms: int = 200
 
     # Whether to also open the colour stream. Off by default -- the main camera
@@ -60,30 +74,80 @@ class DepthCameraConfig:
     enable_color_stream: bool = False
 
     # ------------------------------------------------------------------
-    # DECXIN-SM-2930V1 / generic UVC depth backend
+    # Stereo backend (DECXIN-SM-2930V1 and similar dual-lens UVC modules)
     #
-    # The camera hangs off the Pi's USB-C port as a plain UVC video device, so it
-    # needs no vendor library -- which is also why this backend is the default.
-    # Enumerate what the Pi actually sees with:
-    #     v4l2-ctl --list-devices
-    #     v4l2-ctl -d /dev/video1 --list-formats-ext
-    # and put the *capture* node of the depth camera (not its metadata node, and
-    # never the CSI camera) in uvc_device.
+    # The two lenses are interleaved in a single UVC frame: left eye = left
+    # half, right eye = right half. 1280x480 is picked from the device's format
+    # list because it gives each eye 640x480 (matching the rest of the pipeline)
+    # at 30 fps in MJPG. The other double-wide modes are 640x240 (@20fps YUYV),
+    # 2560x960, 3840x1080, 2560x1080, 2560x720 -- all larger, none faster.
     #
-    # The DECXIN enumerates as a pair of nodes plus a media node:
-    #     /dev/video1   -> the UVC capture interface, this is the one that streams
-    #     /dev/video2   -> the metadata node for video1, never returns a frame
-    #     /dev/media5   -> media controller, not opened directly
-    # Note that /dev/video0 on this car is the CSI camera (unicam, the picamera2
-    # one); pointing this setting at video0 would fight the main camera instead.
+    # Disparity comes back as horizontal pixel shift; depth is then
+    #     depth_mm = scale_mm_px / disparity_px
+    # so stereo *must* be calibrated before it can report millimetres. A wrong
+    # scale is not just "off by a bit": it either triggers a phantom emergency
+    # stop, or -- worse -- reports a clear road where there is a wall. The
+    # backend refuses to start without a scale and falls back to mock.
     # ------------------------------------------------------------------
 
-    # V4L2 device node, or a bare OpenCV index like "0".
-    uvc_device: str = "/dev/video1"
+    # Total frame size (both eyes). Height is the eye height; width is halved
+    # to split the pair. 1280x480 -> 640x480 per eye.
+    stereo_width: int = 1280
+    stereo_height: int = 480
+
+    # Calibration, in mm * px. This is the ONE number to measure, and it is
+    # exactly focal_px * baseline_mm. To get it:
+    #   1. Print a high-contrast target (chequerboard, printed crosshair).
+    #   2. Stand it at a known distance D in millimetres, square to the camera.
+    #   3. Read the disparity d at that target from the centre of a disparity
+    #      frame (or log it).
+    #   4. Set stereo_scale_mm_px = D * d.
+    # A scale of 0 means "not calibrated": the stereo backend refuses to start
+    # and falls back to mock. That is deliberate, not a bug.
+    stereo_scale_mm_px: float = 0.0
+
+    # Physical alternative to the measured scale: if the module's datasheet
+    # gives the lens focal length (pixels, at the width set above) and the
+    # baseline (distance between the lenses, mm), the product is the same
+    # number. Only used when stereo_scale_mm_px is 0.
+    stereo_focal_px: float = 0.0
+    stereo_baseline_mm: float = 0.0
+
+    # StereoBM parameters.
+    # num_disparities must be divisible by 16; it is the widest pixel shift the
+    # matcher searches, so it sets the CLOSEST distance the guard can resolve:
+    #     closest_mm = scale_mm_px / (num_disparities - 1)
+    # The backend warns at start if that is farther than emergency_stop_mm,
+    # because obstacles inside the blind zone would never register. Raise this
+    # if the warning fires.
+    # block_size must be odd. Larger smooths noise but blurs thin obstacles.
+    stereo_num_disparities: int = 128
+    stereo_block_size: int = 15
+
+    # ------------------------------------------------------------------
+    # DECXIN / generic UVC single-stream backend ("decxin")
+    #
+    # Only relevant for a camera that really does expose a 16-bit depth format
+    # over UVC; the DECXIN-SM-2930V1 on this car does not (it needs "stereo").
+    # Kept so the same code drives a Z16/Y16 device without changes.
+    #
+    # The node is discovered at runtime; the value below is only a hint.
+    # `v4l2-ctl --list-devices` numbers nodes in USB enumeration order, which is
+    # not stable. Non-USB nodes are excluded, because the CSI camera that
+    # picamera2 drives sits on a platform bus and must not be taken away.
+    # ------------------------------------------------------------------
+
+    # Preferred V4L2 node, or a bare OpenCV index like "0".
+    # Empty means "scan every USB video node" -- the usual, robust choice.
+    # A path that is not a USB node is refused rather than opened.
+    uvc_device: str = ""
 
     # Pixel format requested from the device. "Z16 " / "Y16 " are the 16-bit
     # depth formats a UVC depth camera normally exposes; the trailing space is
-    # part of the four-character code, not a typo.
+    # part of the four-character code, not a typo. If the device ignores it and
+    # stays on YUYV, the backend says so in the log rather than decoding colour
+    # as depth. Confirm with:
+    #     v4l2-ctl -d <node> --list-formats-ext
     uvc_fourcc: str = "Z16 "
 
     # Millimetres represented by one raw count. 1.0 is the common case (the device
