@@ -15,6 +15,36 @@ class CameraConfig:
     framerate: int = 30
     format: str = "RGB888"  # or 'BGR888'
 
+    # Side-by-side stereo split for the *track* camera.
+    #
+    # The DECXIN-SM-2930V1 and similar dual-lens UVC modules emit one double-wide
+    # frame with the left eye on the left half and the right eye on the right
+    # half. That is what depth_camera.py's "stereo" backend wants, and it splits
+    # the pair itself -- but the same frame must NEVER reach vision.py, because
+    # the line follower would see two tracks side by side and steer straight at
+    # the seam between the eyes.
+    #
+    # It reaches the track camera when the CSI module is missing and camera.py
+    # falls back to cv2.VideoCapture(0), which on this Pi now enumerates the
+    # DECXIN as /dev/video0. The same rule applies if a Picamera2 build ever
+    # captures the same UVC device.
+    #
+    #   "auto"    - split only when the frame's width/height >= 2.2, which is
+    #               true of every DECXIN native mode and of nothing a single-lens
+    #               webcam produces.
+    #   "always"  - split every frame in half. Needed when the capture path has
+    #               already rescaled the double-wide pair into a normal aspect
+    #               ratio before camera.py sees it, which defeats the "auto"
+    #               heuristic. main.py already forces this when the depth backend
+    #               is "stereo", because then the device is known to be dual-lens.
+    #   "never"   - leave the frame alone.
+    split_stereo_frame: str = "auto"
+    # Which half survives: "left" (the reference eye used by depth_camera.py) or
+    # "right". The choice is cosmetic for line following -- both eyes see the
+    # same track -- but keeping it consistent avoids surprises when comparing a
+    # frame against the depth pipeline.
+    stereo_eye: str = "left"
+
 
 @dataclass
 class DepthCameraConfig:
@@ -88,6 +118,11 @@ class DepthCameraConfig:
     # scale is not just "off by a bit": it either triggers a phantom emergency
     # stop, or -- worse -- reports a clear road where there is a wall. The
     # backend refuses to start without a scale and falls back to mock.
+    #
+    # test_stereo_calib.py measures the number for you: put a high-contrast
+    # target at a known distance, run
+    #     python3 test_stereo_calib.py --distance 1000
+    # and copy the printed stereo_scale_mm_px into this file.
     # ------------------------------------------------------------------
 
     # Total frame size (both eyes). Height is the eye height; width is halved
@@ -100,7 +135,7 @@ class DepthCameraConfig:
     #   1. Print a high-contrast target (chequerboard, printed crosshair).
     #   2. Stand it at a known distance D in millimetres, square to the camera.
     #   3. Read the disparity d at that target from the centre of a disparity
-    #      frame (or log it).
+    #      frame (or run test_stereo_calib.py, which reads it for you).
     #   4. Set stereo_scale_mm_px = D * d.
     # A scale of 0 means "not calibrated": the stereo backend refuses to start
     # and falls back to mock. That is deliberate, not a bug.

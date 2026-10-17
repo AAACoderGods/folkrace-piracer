@@ -139,6 +139,28 @@ class DepthGuard:
         return steering, throttle, False
 
 
+def resolve_split_mode(config: AppConfig) -> str:
+    """
+    Decide how Camera should treat a side-by-side stereo frame.
+
+    When the depth backend is "stereo", the module is known to be a dual-lens
+    device, and the same device feeds the track camera. The auto heuristic can be
+    defeated by a capture path that rescales the double-wide pair down to a normal
+    aspect ratio before Camera sees it, so the split is forced in that case. The
+    operator can still opt out with "never".
+    """
+    mode = (config.camera.split_stereo_frame or "auto").lower()
+    if mode == "never":
+        return mode
+    if config.depth.enable_depth and (config.depth.backend or "").lower() == "stereo":
+        if mode != "always":
+            logging.info("Camera: forcing split_stereo_frame='always' because the "
+                         "depth backend is 'stereo' -- the same dual-lens device "
+                         "feeds the track camera.")
+        return "always"
+    return mode
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Folkrace Autonomous Driving on PiRacer Pro")
     parser.add_argument("--display", action="store_true", help="Show live OpenCV visual debug window (GUI)")
@@ -227,7 +249,9 @@ def main():
         width=config.camera.width,
         height=config.camera.height,
         framerate=config.camera.framerate,
-        format=config.camera.format
+        format=config.camera.format,
+        split_stereo_frame=resolve_split_mode(config),
+        stereo_eye=config.camera.stereo_eye,
     )
     # Constructed only when the flag was passed. Without it the depth camera is
     # simply absent, which is the same shape as "constructed but fell back to mock

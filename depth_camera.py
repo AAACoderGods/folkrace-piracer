@@ -402,9 +402,9 @@ class DepthCamera:
         The mm*px constant used to turn disparity into depth.
 
         Prefers the directly measured stereo_scale_mm_px. Falls back to the
-        physical focal*基线 product for users who have a datasheet instead of a
-        measuring tape. Returns 0.0 when neither is set, which start() treats as
-        "refuse to run uncalibrated".
+        physical focal*baseline product for users who have a datasheet instead
+        of a measuring tape. Returns 0.0 when neither is set, which start()
+        treats as "refuse to run uncalibrated".
         """
         scale = float(self.config.stereo_scale_mm_px)
         if scale > 0.0:
@@ -417,7 +417,7 @@ class DepthCamera:
 
     def _start_stereo(self) -> bool:
         """
-        Bring up MVPG stereo capture on the first USB node that yields a frame.
+        Bring up stereo capture on the first USB node that yields a frame.
 
         Calibration is mandatory: without a scale, identical left/right images
         produce a disparity of zero everywhere, which the range check reads as
@@ -430,9 +430,10 @@ class DepthCamera:
                 "Depth camera: stereo backend is NOT calibrated. Set "
                 "DepthCameraConfig.stereo_scale_mm_px to (distance_mm * disparity_px) "
                 "measured from a target at a known distance, or set stereo_focal_px "
-                "and stereo_baseline_mm from the datasheet. Refusing to run "
-                "uncalibrated: a wrong scale would fake an emergency stop or miss a "
-                "real obstacle. Falling back to mock for now.")
+                "and stereo_baseline_mm from the datasheet. Measure it with:\n"
+                "    python3 test_stereo_calib.py --distance 1000\n"
+                "Refusing to run uncalibrated: a wrong scale would fake an emergency "
+                "stop or miss a real obstacle. Falling back to mock for now.")
             return False
 
         num_disp = int(self.config.stereo_num_disparities)
