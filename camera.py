@@ -24,7 +24,7 @@ except ImportError:
 class Camera:
     """Wrapper around Picamera2 with fallback support."""
 
-    def __init__(self, width: int = 3840, height: int = 1080, framerate: int = 30, format: str = "RGB888"):
+    def __init__(self, width: int = 1920, height: int = 1080, framerate: int = 30, format: str = "RGB888"):
         self.width = width
         self.height = height
         self.framerate = framerate
