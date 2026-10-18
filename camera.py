@@ -28,6 +28,17 @@ except ImportError:
 _STEREO_ASPECT_THRESHOLD = 2.2
 
 
+def _fourcc_str(value) -> str:
+    """把 CAP_PROP_FOURCC 的整数还原成四字符码，用于日志诊断。"""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    return "".join(chr((value >> (8 * i)) & 0xFF) for i in range(4)).strip()
+
+
 class Camera:
     """Wrapper around Picamera2 with fallback support."""
 
@@ -36,7 +47,11 @@ class Camera:
                  stereo_eye: str = "left",
                  stereo_capture_width: int = 1280,
                  stereo_capture_height: int = 480,
-                 prefer_v4l2: bool = False):
+                 prefer_v4l2: bool = False,
+                 v4l2_fourcc: str = "MJPG",
+                 v4l2_auto_exposure_mode: float = -1.0,
+                 v4l2_exposure_absolute: float = -1.0,
+                 v4l2_gain: float = -1.0):
         self.width = width
         self.height = height
         self.framerate = framerate
@@ -54,6 +69,22 @@ class Camera:
         # 只有 MJPG 的双目 UVC 相机来说这是画质的主要损失来源。只有在双目模式
         # 下才启用，CSI 相机不受影响。
         self.prefer_v4l2 = bool(prefer_v4l2)
+        # V4L2 采集时强制使用的像素格式。
+        #
+        # 这是之前只有 25fps 的根因：不设置 FOURCC 时驱动会选 YUYV（未压缩），
+        # 1280x480@30fps ≈ 37 MB/s，正好卡在 USB 2.0 的实测上限附近，驱动自动
+        # 降级到 25fps 甚至更低。MJPG 只要 1/10 的带宽，能跑满 30fps。
+        # 恢复成 "auto" 或空串表示"不干预，让驱动自己选"。
+        self.v4l2_fourcc = (v4l2_fourcc or "").strip()
+        # 三个可选的 V4L2 控制量，默认 -1 表示"不要碰设备"。
+        #
+        # 曝光/增益的必要性：低光下驱动会拉长曝光时间，帧率被压到 25/20/15fps，
+        # 同时噪点增加导致 SGBM 匹配失败 → 深度读数为 0。手动固定曝光能同时
+        # 解决这两个问题。但不同 OpenCV 后端对 CAP_PROP_AUTO_EXPOSURE 的枚举
+        # 理解不一致（0.25/0.75 与 1/3 都见过），所以默认关闭、由用户实验。
+        self.v4l2_auto_exposure_mode = float(v4l2_auto_exposure_mode)
+        self.v4l2_exposure_absolute = float(v4l2_exposure_absolute)
+        self.v4l2_gain = float(v4l2_gain)
         self.picam2 = None
         self.cap = None
         self.is_running = False
@@ -151,6 +182,38 @@ class Camera:
         return (max(int(self.width), self.stereo_capture_width),
                 max(int(self.height), self.stereo_capture_height))
 
+    def _apply_v4l2_controls(self):
+        """
+        应用用户显式设置的 V4L2 控制量（曝光 / 增益）。
+
+        全部为 -1（默认）时什么都不做：自动曝光对"有时候能读、有时候读不出"
+        的场景其实更友好，只有确认是低光导致 SGBM 崩掉时才需要手动固定。
+        每个 set 都单独 try：一个控制量不被驱动支持，不应该影响其余控制量的
+        应用，更不应该影响相机启动。
+        """
+        if cv2 is None or self.cap is None:
+            return
+        if self.v4l2_auto_exposure_mode >= 0:
+            try:
+                self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, self.v4l2_auto_exposure_mode)
+                logging.info("Camera: V4L2 auto-exposure mode -> %.3f "
+                             "(value meaning depends on the OpenCV/V4L2 build)",
+                             self.v4l2_auto_exposure_mode)
+            except Exception as e:
+                logging.warning("Camera: setting CAP_PROP_AUTO_EXPOSURE failed: %s", e)
+        if self.v4l2_exposure_absolute >= 0:
+            try:
+                self.cap.set(cv2.CAP_PROP_EXPOSURE, self.v4l2_exposure_absolute)
+                logging.info("Camera: V4L2 exposure -> %.3f", self.v4l2_exposure_absolute)
+            except Exception as e:
+                logging.warning("Camera: setting CAP_PROP_EXPOSURE failed: %s", e)
+        if self.v4l2_gain >= 0:
+            try:
+                self.cap.set(cv2.CAP_PROP_GAIN, self.v4l2_gain)
+                logging.info("Camera: V4L2 gain -> %.3f", self.v4l2_gain)
+            except Exception as e:
+                logging.warning("Camera: setting CAP_PROP_GAIN failed: %s", e)
+
     def _open_v4l2_capture(self, why: str) -> bool:
         """
         Try `cv2.VideoCapture(0)` at the configured capture size.
@@ -169,9 +232,50 @@ class Camera:
                 logging.warning("OpenCV VideoCapture (%s) could not open index 0.", why)
                 self._release_cap()
                 return False
+
+            # 先设 FOURCC，再设分辨率。顺序不能反：部分 V4L2 驱动在设定格式时
+            # 会顺带重置分辨率，先设尺寸后设格式会把尺寸请求丢掉。
+            if len(self.v4l2_fourcc) == 4:
+                self.cap.set(cv2.CAP_PROP_FOURCC,
+                             cv2.VideoWriter_fourcc(*self.v4l2_fourcc))
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._capture_size[0])
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._capture_size[1])
             self.cap.set(cv2.CAP_PROP_FPS, self.framerate)
+            self._apply_v4l2_controls()
+
+            # 读回协商结果并打印。这是之前最缺的诊断信息：驱动拒绝 FOURCC / 只
+            # 支持固定分辨率列表时，会静默降级到低分辨率或低帧率，而旧代码没有
+            # 任何一个地方能让人看见"配置写的 30fps/1280x480，实际跑的是
+            # 25fps/864x320"。这段日志就是那道唯一的光。
+            actual_fourcc = _fourcc_str(self.cap.get(cv2.CAP_PROP_FOURCC))
+            actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            logging.info(
+                "V4L2 negotiated (%s): %dx%d @ %.1ffps, fourcc '%s' "
+                "(requested %dx%d @ %dfps, fourcc '%s')",
+                why, actual_w, actual_h, actual_fps,
+                actual_fourcc or "(unreported)",
+                self._capture_size[0], self._capture_size[1], self.framerate,
+                self.v4l2_fourcc or "(none)")
+
+            if len(self.v4l2_fourcc) == 4 and actual_fourcc and actual_fourcc != self.v4l2_fourcc:
+                logging.warning(
+                    "V4L2: device ignored the requested pixel format '%s' and is "
+                    "streaming '%s'. On a full-width stereo pair that format is the "
+                    "usual reason for a 25fps cap -- run "
+                    "`v4l2-ctl -d /dev/video0 --list-formats-ext` and use one of the "
+                    "listed formats.", self.v4l2_fourcc, actual_fourcc)
+            if (actual_w and actual_h
+                    and (actual_w != self._capture_size[0]
+                         or actual_h != self._capture_size[1])):
+                logging.warning(
+                    "V4L2: device uses %dx%d, not the requested %dx%d. Depth scale "
+                    "is adjusted automatically to the real eye width, but the vision "
+                    "crop and the target width/height no longer line up.",
+                    actual_w, actual_h,
+                    self._capture_size[0], self._capture_size[1])
+
             self.is_running = True
             logging.info("✅ OpenCV VideoCapture (%s) started at %dx%d @ %dfps.",
                          why, self._capture_size[0], self._capture_size[1], self.framerate)

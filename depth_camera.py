@@ -45,7 +45,7 @@ Design rules, in order of importance:
    Opening the same node a second time from here either fails outright -- which
    shows up as "stereo fell back to mock" -- or, worse, succeeds and hands out
    frames interleaved with vision's, so the "left" and "right" halves that
-   StereoBM receives come from different moments and the disparity map is pure
+   SGBM receives come from different moments and the disparity map is pure
    noise. The stereo backend therefore *shares* camera.py's raw frame through
    `frame_source` and only opens the device itself when no such source exists.
 
@@ -54,6 +54,15 @@ Design rules, in order of importance:
    control loop on that would slow steering and throttling just as much. The
    sampler thread caches the latest depth frame; the main loop only ever reads
    the cache.
+
+7. Calibration is per eye *width*. depth_mm = scale_mm_px / disparity_px, and
+   disparity scales with focal length, which scales with image width. If the
+   device hands back a frame whose eye is not the width stereo_scale_mm_px was
+   measured at, the scale is scaled linearly (see _scale_for_eye_width) instead
+   of being trusted as-is. Without that, a device that only supports a fixed
+   list of native resolutions -- and falls back to 1280x480 when asked for
+   864x320 -- silently misreports every distance by eye_w/stereo_width, which
+   looks exactly like "the depth camera has no reading".
 
 To add a new backend (OAK-D, Orbbec, a vendor SDK, ...):
     - add a probe block for the library at the top
@@ -202,6 +211,8 @@ class DepthCamera:
         # One-shot diagnostic: report the first valid disparity map so the
         # operator can confirm the pipeline is producing distance at all.
         self._stereo_first_logged = False
+        # 每个 scale 只打印一次换算日志，避免 10Hz 下刷屏。
+        self._stereo_scale_logged = False
         # Per-device scale factor from raw counts to metres. RealSense sets it
         # per model; 0.001 (i.e. 1 count = 1 mm) is the common default and the
         # value the mock backend reports, so it is a safe fallback if start()
@@ -226,18 +237,20 @@ class DepthCamera:
             if not _CV2_AVAILABLE:
                 logging.warning("Depth camera: 'stereo' requested but OpenCV is not "
                                 "installed. pip install opencv-python")
-            elif not hasattr(cv2, "StereoBM_create"):
+            elif not (hasattr(cv2, "StereoSGBM_create") or hasattr(cv2, "StereoBM_create")):
                 logging.warning("Depth camera: 'stereo' requested but this OpenCV "
-                                "build has no cv2.StereoBM_create.")
+                                "build has neither StereoSGBM_create nor "
+                                "StereoBM_create.")
             elif self._start_stereo():
                 self.backend = "stereo"
                 self.is_running = True
-                logging.info("✅ Depth camera started: stereo (UVC on %s, %dx%d, "
-                             "scale=%.1f mm*px, %d disparities)",
+                logging.info("✅ Depth camera started: stereo (UVC on %s, "
+                             "eye %dx%d, scale=%.1f mm*px, %d disparities, %s)",
                              self._uvc_device_in_use,
                              self.config.stereo_width, self.config.stereo_height,
                              self._stereo_effective_scale(),
-                             self.config.stereo_num_disparities)
+                             self.config.stereo_num_disparities,
+                             "SGBM" if self.config.stereo_use_sgbm else "BM")
                 return
             else:
                 logging.warning("Depth camera: stereo failed to start; "
@@ -433,6 +446,34 @@ class DepthCamera:
             return focal * baseline
         return 0.0
 
+    def _scale_for_eye_width(self, baseline_scale: float, eye_w: int) -> float:
+        """
+        把"在 config.stereo_width 宽度下标定的 scale"换算到实际的单眼宽度上。
+
+        depth_mm = scale / disparity，而 disparity 与 focal 成正比、focal 与
+        图像宽度成正比，所以在物理距离不变的条件下 scale 也和眼宽成正比。
+        设备实际给出的宽度与配置不一致时（V4L2 只支持固定的原生模式列表，
+        请求的 864x320 会被回退到 1280x480），必须按这个比例换算，否则所有
+        距离会系统性地偏差 eye_w / stereo_width 倍——表现为大量读数落到
+        min_depth_mm / max_depth_mm 之外而被丢弃。
+
+        这不是精度优化，是正确性要求。
+        """
+        ref_w = int(self.config.stereo_width or 0)
+        if ref_w <= 0 or eye_w <= 0 or eye_w == ref_w:
+            return baseline_scale
+        scaled = baseline_scale * (float(eye_w) / float(ref_w))
+        if not self._stereo_scale_logged:
+            self._stereo_scale_logged = True
+            logging.warning(
+                "Depth camera: eye width is %dpx but stereo_scale_mm_px was "
+                "measured at stereo_width=%dpx. Scaling %.1f -> %.1f mm*px to "
+                "keep distances meaningful. This is a safety net, not a "
+                "substitute for calibrating at the real width: run "
+                "test_stereo_calib.py and set stereo_width/scale to match.",
+                eye_w, ref_w, baseline_scale, scaled)
+        return scaled
+
     def _start_stereo(self) -> bool:
         """
         Bring up stereo capture, preferring to share camera.py's raw frame.
@@ -450,11 +491,12 @@ class DepthCamera:
         """
         scale = self._stereo_effective_scale()
         logging.info("Depth camera: stereo starting (scale=%.1f mm*px, "
-                     "source=%s, target %dx%d, %d disparities)",
+                     "source=%s, target eye %dx%d, %d disparities, %s)",
                      scale,
                      "frame_source" if self._frame_source is not None else "(none)",
                      self.config.stereo_width, self.config.stereo_height,
-                     self.config.stereo_num_disparities)
+                     self.config.stereo_num_disparities,
+                     "SGBM" if self.config.stereo_use_sgbm else "BM")
         if scale <= 0.0:
             logging.warning(
                 "Depth camera: stereo backend is NOT calibrated. Set "
@@ -539,21 +581,22 @@ class DepthCamera:
             return False
 
         h, w = frame.shape[:2]
-        # Size protection: if camera.py provides a 640-wide frame (CSI single eye, or
-        # not captured at native stereo size), forcing disparity computation will only
-        # produce garbage data. Better to not start than to give wrong distances.
-        min_w = int(self.config.stereo_width * 0.9)
-        if w < min_w:
+        # 至少 320 宽才有意义：比这更窄的帧根本不可能是双目对。不在这里跟
+        # 2*stereo_width 做硬匹配，因为设备可能合法地回退到别的原生模式
+        # （1280x480 / 1600x600 / 2560x960 等），scale 会自动按实际眼宽换算，
+        # 那比直接拒掉更有用。
+        if w < 320:
             logging.warning(
-                "Depth camera: frame from camera.py is %dx%d, not stereo size "
-                "(expected at least %d wide). Usually means Camera did not capture at "
-                "native stereo size. Check if main.py forces split_stereo_frame='always' "
-                "when depth backend='stereo', and that config.camera.stereo_capture_width "
-                "matches the actual stereo total width.",
-                w, h, min_w)
+                "Depth camera: frame from camera.py is %dx%d, too narrow to be a "
+                "stereo pair (need at least 320 wide). Check camera.stereo_capture_width "
+                "and that split_stereo_frame='always' is in effect.", w, h)
             return False
 
-        depth = self._stereo_frame_to_depth(frame, scale)
+        # eye_w = w // 2，先按实际宽度把 scale 换算过去再试算一次，避免用错误
+        # scale 得到"全 0"的假阴性。
+        eye_w = w // 2
+        real_scale = self._scale_for_eye_width(scale, eye_w)
+        depth = self._stereo_frame_to_depth(frame, real_scale)
         if depth is None:
             logging.warning("Depth camera: frame from external source could not compute disparity, switching to direct device open.")
             return False
@@ -562,8 +605,9 @@ class DepthCamera:
         self._uvc_device_in_use = f"camera.py shared frame ({w}x{h})"
         self._launch_stereo_sampler()
         logging.info(
-            "UVC stereo: reusing camera.py's stereo frame (%dx%d), not opening the same device again.",
-            w, h)
+            "UVC stereo: reusing camera.py's stereo frame (%dx%d, eye %d wide), "
+            "not opening the same device again. scale now %.1f mm*px.",
+            w, h, eye_w, real_scale)
         return True
 
     def _launch_stereo_sampler(self):
@@ -594,12 +638,25 @@ class DepthCamera:
                 logging.debug("stereo: %s could not be opened.", device)
                 return False
 
-            # MJPG is what gives 30 fps at the native pair size with tolerable USB
-            # bandwidth. YUYV is also listed, but only at 10 fps -- too slow.
+            # MJPG 是唯一在原生双目尺寸下能跑 30fps 的格式。YUYV 虽然也在列表里，
+            # 但只有 10fps（未压缩带宽不够），对 PID 来说太慢。
+            # 顺序：先 FOURCC，再分辨率——部分驱动在设定格式时会重置分辨率。
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.stereo_width * 2)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.stereo_height)
             cap.set(cv2.CAP_PROP_FPS, self.config.fps)
+
+            asked_w = self.config.stereo_width * 2
+            asked_h = self.config.stereo_height
+            actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            actual_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            actual_fourcc = _fourcc_str(cap.get(cv2.CAP_PROP_FOURCC))
+            logging.info("UVC stereo %s negotiated %dx%d @ %.1ffps, fourcc '%s' "
+                         "(requested %dx%d, MJPG)",
+                         device, actual_w or 0, actual_h or 0, actual_fps,
+                         actual_fourcc or "(unreported)",
+                         asked_w, asked_h)
 
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -613,14 +670,16 @@ class DepthCamera:
 
             # One sample is weak evidence, but it is enough to reject a node whose
             # disparity map is completely flat (metadata node, or a lens cap).
-            scale = self._stereo_effective_scale()
-            depth = self._stereo_frame_to_depth(frame, scale)
+            # Use the real eye width for the scale, same as the shared-source path.
+            real_scale = self._scale_for_eye_width(
+                self._stereo_effective_scale(), frame.shape[1] // 2)
+            depth = self._stereo_frame_to_depth(frame, real_scale)
             if depth is None:
                 logging.debug("stereo: %s failed to produce a depth frame.", device)
                 return False
 
             # Hand the handle over so finally does not release it.
-            self._uvc_fourcc = _fourcc_str(cap.get(cv2.CAP_PROP_FOURCC))
+            self._uvc_fourcc = actual_fourcc
             self._uvc = cap
             cap = None
             return True
@@ -643,6 +702,13 @@ class DepthCamera:
         rows from a real stereo pair are already rectified, so no rectification
         is attempted here. Anything that is not a real match is left at 0.0 --
         the "no reading" marker -- rather than turned into a plausible distance.
+
+        `scale` must already be normalised to this frame's eye width; see
+        _scale_for_eye_width. The matcher is StereoSGBM by default because
+        StereoBM's per-pixel winner-take-all cost is far too sensitive to the
+        noise on a low-light UVC sensor: it produces a handful of isolated
+        matches surrounded by holes, which reads as "the depth camera has no
+        reading" once the range check drops the holes.
         """
         if frame is None or not isinstance(frame, np.ndarray) or frame.ndim != 3:
             return None
@@ -677,16 +743,57 @@ class DepthCamera:
         if block < 5 or block % 2 == 0:
             block = 15
 
+        # 统一的整数视差（SGBM/BM 都输出 16 倍定点），后面按 /16 转成像素。
         try:
-            bm = cv2.StereoBM_create(numDisparities=num_disp, blockSize=block)
-            # BM output is fixed-point with four fractional bits; divide by 16
-            # for pixels. Invalid locations come out as a multiple of -16.
-            raw = bm.compute(left_g, right_g).astype(np.float32) / 16.0
+            if self.config.stereo_use_sgbm:
+                p1 = 8 * block * block
+                p2 = 32 * block * block
+                matcher = cv2.StereoSGBM_create(
+                    minDisparity=int(self.config.stereo_min_disparity),
+                    numDisparities=num_disp,
+                    blockSize=block,
+                    P1=p1,
+                    P2=p2,
+                    disp12MaxDiff=max(0, int(self.config.stereo_disp12_max_diff)),
+                    uniquenessRatio=max(0, int(self.config.stereo_uniqueness_ratio)),
+                    speckleWindowSize=max(0, int(self.config.stereo_speckle_window_size)),
+                    speckleRange=max(0, int(self.config.stereo_speckle_range)),
+                    preFilterCap=31,
+                    mode=cv2.STEREO_SGBM_MODE_SGBM,
+                )
+            else:
+                matcher = cv2.StereoBM_create(numDisparities=num_disp, blockSize=block)
+            raw16 = matcher.compute(left_g, right_g)
         except Exception as e:
-            logging.debug("stereo: StereoBM failed: %s", e)
+            logging.debug("stereo: disparity matcher failed: %s", e)
+            return None
+        if raw16 is None:
             return None
 
-        disparity = np.where(raw > 0.0, raw, 0.0)
+        if raw16.dtype != np.int16:
+            raw16 = raw16.astype(np.int16)
+        # SGBM/BM 的无效位置是 -16 的倍数；清成 0 再用 filterSpeckles 抹掉孤立点。
+        raw16[raw16 < 0] = 0
+        # filterSpeckles 要求 CV_16S、newVal 与输入同尺度，0 表示无效。
+        try:
+            cv2.filterSpeckles(raw16, 0,
+                               max(0, int(self.config.stereo_speckle_window_size)),
+                               max(0, int(self.config.stereo_speckle_range)))
+        except Exception as e:
+            logging.debug("stereo: filterSpeckles failed (non-critical): %s", e)
+
+        disparity = raw16.astype(np.float32) / 16.0
+
+        # 中值滤波把残留的零星噪点压平，避免 measure_obstacle_mm 里的 min()
+        # 被单个错误点触发一次误刹车。
+        median_k = int(self.config.stereo_median_blur)
+        if median_k >= 3 and median_k % 2 == 1:
+            try:
+                disparity = cv2.medianBlur(disparity, median_k)
+            except Exception as e:
+                logging.debug("stereo: medianBlur failed (non-critical): %s", e)
+
+        disparity = np.where(disparity > 0.0, disparity, 0.0)
         depth = np.zeros(disparity.shape, dtype=np.float32)
         valid = disparity > 0.0
         if np.any(valid):
@@ -696,20 +803,22 @@ class DepthCamera:
     def _stereo_sampler_loop(self):
         """Background sampler: keep the cached depth frame fresh."""
         scale = self._stereo_effective_scale()
-        # Decoupled from main loop's 30 Hz: StereoBM takes hundreds of ms on 1280x480x256,
-        # running at 30 Hz would consume a core and slow down PID. 10 Hz is sufficient for obstacle detection.
+        # Decoupled from main loop's 30 Hz: SGBM takes tens of ms per frame,
+        # running at 30 Hz would consume a core and slow down PID. 10 Hz is
+        # sufficient for obstacle detection.
         fps = int(getattr(self.config, "stereo_target_fps", 15) or 15)
         period = 1.0 / max(1.0, float(fps))
         event = self._stereo_stop_event
         if event is None:
             return
 
-        # When sharing frame source, the same array is fed repeatedly; id dedup avoids computing the same frame multiple times.
-        last_frame_id = None
+        # 保留上一帧的引用（不是 id！id 会在对象被回收后被新的 ndarray 复用，
+        # 曾导致"明明是新帧却被当成旧帧跳过"）。用 `is` 比较时引用必须还活着，
+        # 所以 last_frame 要一直持有。
+        last_frame = None
 
         while not event.is_set():
             started = time.monotonic()
-            depth = None
             frame = None
             try:
                 if self._stereo_external:
@@ -722,31 +831,31 @@ class DepthCamera:
                         ok, raw = cap.read()
                     if ok and raw is not None:
                         frame = raw
-                if frame is not None:
-                    frame_id = id(frame)
-                    if frame_id != last_frame_id:
-                        depth = self._stereo_frame_to_depth(frame, scale)
-                        last_frame_id = frame_id
-                    else:
-                        with self._stereo_lock:
-                            depth = self._stereo_latest
             except Exception as e:
                 logging.debug("stereo: sampler read failed: %s", e)
 
-            if depth is not None:
+            # 共享源时，若 camera 还没产出下一帧，同一个对象会再次出现；
+            # 直接复用旧缓存，别把同一帧重复算一遍 SGBM。
+            if frame is not None and frame is not last_frame:
+                last_frame = frame
+                eye_w = frame.shape[1] // 2 if frame.ndim >= 2 else 0
+                real_scale = self._scale_for_eye_width(scale, eye_w)
+                depth = self._stereo_frame_to_depth(frame, real_scale)
                 with self._stereo_lock:
                     self._stereo_latest = depth
-                if not self._stereo_first_logged:
+                if depth is not None and not self._stereo_first_logged:
                     self._stereo_first_logged = True
                     valid_ratio = float(np.count_nonzero(depth)) / float(depth.size)
+                    valid_px = depth[depth > 0.0]
+                    median_mm = float(np.median(valid_px)) if valid_px.size else 0.0
                     logging.info(
-                        "stereo: first depth frame ready, valid pixels %.1f%%. If this number is low, "
-                        "StereoBM likely cannot find matches (scene too smooth / target too far / "
-                        "lighting too dark). Try increasing stereo_block_size or use a more textured scene.",
-                        valid_ratio * 100.0)
-            else:
-                with self._stereo_lock:
-                    self._stereo_latest = None
+                        "stereo: first depth frame ready (eye %dpx, scale %.1f): "
+                        "valid pixels %.1f%%, median %.0f mm. If the ratio is low, "
+                        "SGBM cannot find matches -- the scene is too smooth / too "
+                        "far / too dark. Try raising stereo_block_size, or "
+                        "stereo_num_disparities, or fixing the exposure in "
+                        "CameraConfig.v4l2_*.",
+                        eye_w, real_scale, valid_ratio * 100.0, median_mm)
 
             elapsed = time.monotonic() - started
             remaining = period - elapsed

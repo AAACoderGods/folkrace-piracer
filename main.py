@@ -257,6 +257,17 @@ def main():
         stereo_capture_width=config.camera.stereo_capture_width,
         stereo_capture_height=config.camera.stereo_capture_height,
         prefer_v4l2=config.camera.prefer_v4l2,
+        # V4L2 采集格式与曝光控制。
+        #
+        # 这 4 个参数不传进去，config.py 里新增的字段就是死代码——Camera 用的是
+        # 显式关键字传参，不是 **vars(config.camera)，任何漏传的字段都会静默
+        # 使用 Camera.__init__ 的默认值。之前 v4l2_fourcc 一直生效是因为默认值
+        # 就是 "MJPG"，但曝光/增益这几个默认是 -1（不干预），必须在 config 里
+        # 改动才会起作用——所以这里必须显式转发。
+        v4l2_fourcc=config.camera.v4l2_fourcc,
+        v4l2_auto_exposure_mode=config.camera.v4l2_auto_exposure_mode,
+        v4l2_exposure_absolute=config.camera.v4l2_exposure_absolute,
+        v4l2_gain=config.camera.v4l2_gain,
     )
     # Constructed only when the flag was passed. Without it the depth camera is
     # simply absent, which is the same shape as "constructed but fell back to mock

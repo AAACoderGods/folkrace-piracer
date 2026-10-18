@@ -10,11 +10,15 @@ from dataclasses import dataclass, field
 class CameraConfig:
     # 输出给 vision.py / webui 的分辨率（单眼）。
     #
-    # 这个值要跟 stereo_capture_width / 2 实际能给出的单眼尺寸对得上，否则
-    # resize 会把有效信息压掉：1280 宽的单眼如果缩成 640 输出，画面自然会糊。
-    # 双目相机的上限是 stereo_capture_width / 2；再大的 width 只会是拉伸。
-    width: int = 432
-    height: int = 240
+    # 这个值要与 stereo_capture_width / 2 和 stereo_capture_height 对齐，
+    # 否则 camera.py 会把单眼硬 resize 到这个尺寸——之前 width=432/height=240
+    # 配 stereo_capture 864x320，就是把 432x320 的眼睛压成 432x240 的元凶，
+    # VisionConfig 的 ROI 也跟着一起错位。
+    #
+    # 640x480 是 1280x480 双目拆出来的单眼原生尺寸，跟摄像头对齐后不会有任何
+    # resize 拉伸。
+    width: int = 640
+    height: int = 480
     framerate: int = 30
     format: str = "RGB888"  # or 'BGR888'
 
@@ -52,13 +56,18 @@ class CameraConfig:
     # 只有 split_stereo_frame="always" 时生效——此时 Camera 会以这个尺寸向设备
     # 请求采集，并把未拆分帧共享给 depth_camera.py。
     #
-    # 864x320 是 1280x480 的 2/3，性能友好。
+    # 1280x480 是 DECXIN-SM-2930V1 的一个原生模式（30fps@MJPG），单眼 640x480。
+    # 之前的 864x320 不在模组的支持列表里（native 只有 1280x480 / 1600x600 /
+    # 2560x960 / 2560x1080 / 3840x1080 / 2560x720），驱动会回退到最近的一个模式，
+    # 导致 depth_camera 按错误宽度计算 scale。请按 `v4l2-ctl -d <node>
+    # --list-formats-ext` 的真实列表选。
     #
     # 改了这两项后，stereo_scale_mm_px 必须重新校准：视差里 focal 是按像素算的，
     # 分辨率改变后同一块靶子在同一距离上给出的视差也会改变，旧的 scale 会把距离
-    # 算错。
-    stereo_capture_width: int = 864
-    stereo_capture_height: int = 320
+    # 算错。depth_camera 会按眼宽自动线性换算，但那只是防止彻底失效的兜底，
+    # 精确值仍然要实测。
+    stereo_capture_width: int = 1280
+    stereo_capture_height: int = 480
 
     # 双目模式下走 V4L2 直连，绕过 Picamera2。
     #
@@ -68,6 +77,29 @@ class CameraConfig:
     # （即 main.py 已经确认这是一台双目相机）时才会启用，CSI 相机不受影响。
     # 若直连失败，start() 会自动回退到 Picamera2。
     prefer_v4l2: bool = True
+
+    # 强制使用的 V4L2 像素格式。
+    #
+    # 这是之前只有 25fps 的根因：不设 FOURCC 时驱动会选 YUYV（未压缩），
+    # 1280x480@30fps ≈ 37 MB/s 就卡在 USB 2.0 的实测上限附近，驱动自动降级到
+    # 25fps（甚至更低）。MJPG 只要约 1/10 的带宽，能稳定跑满 30fps。
+    # 设成 "" 表示不干预、让驱动自己选（调试时用）。
+    v4l2_fourcc: str = "MJPG"
+
+    # 可选的 V4L2 曝光 / 增益控制。默认 -1 表示"不要碰设备"。
+    #
+    # 什么时候需要动它们：低光下驱动会拉长曝光时间，帧率被压到 25/20/15fps，
+    # 同时噪点增加，SGBM 在噪声大的图上大量匹配失败 → 深度读数为 0。
+    # 固定住曝光和增益能让深度读数稳定，代价是亮处可能过曝，跑赛道前要调。
+    #
+    # v4l2_auto_exposure_mode 的取值依赖驱动和 OpenCV 后端：常见的是
+    # 1 = 手动、3 = 自动（V4L2_EXPOSURE_* 枚举），也有 0.25/0.75 的旧形式。
+    # 建议先用 `v4l2-ctl -d /dev/video0 --list-ctrls` 看设备支持什么，再试。
+    v4l2_auto_exposure_mode: float = -1.0
+    # 曝光绝对值（单位是 100µs，具体取决于驱动）。仅在 auto_exposure_mode 手动时有效。
+    v4l2_exposure_absolute: float = -1.0
+    # 模拟增益。低光下适当抬高能减少噪点对匹配的破坏，太高又会引入新的噪点。
+    v4l2_gain: float = -1.0
 
 
 @dataclass
@@ -82,7 +114,7 @@ class DepthCameraConfig:
     and none of those should stop the car from following the line.
 
     Front is where the depth camera earns its place: sensors.py covers the sides
-    with ultrasonic/IR, and nothing there looks at what is directly ahead.
+    with ultrasonic/IR, and nothing there looks directly ahead.
     """
     # Master switch. --allow-depth-camera is what normally flips this.
     enable_depth: bool = False
@@ -136,7 +168,7 @@ class DepthCameraConfig:
     #
     # The two lenses are interleaved in a single UVC frame: left eye = left
     # half, right eye = right half. The frame is shared with camera.py, so
-    # StereoBM works on the native, un-squashed pair.
+    # SGBM works on the native, un-squashed pair.
     #
     # Disparity comes back as horizontal pixel shift; depth is then
     #     depth_mm = scale_mm_px / disparity_px
@@ -151,15 +183,18 @@ class DepthCameraConfig:
     # and copy the printed stereo_scale_mm_px into this file.
     # ------------------------------------------------------------------
 
-    # 单眼分辨率（深度计算用）。必须与 camera.stereo_capture_width / 2 相等，
-    # 否则 _try_start_stereo_from_source 会因为尺寸不匹配而拒绝共享帧。
-    # 432x320 的单眼对应 864x320 的总尺寸。
-    stereo_width: int = 432
-    stereo_height: int = 320
+    # 单眼分辨率（深度计算用）。
+    #
+    # 必须与 camera.stereo_capture_width / 2、camera.stereo_capture_height 相等。
+    # 若与实际帧宽不一致，depth_camera 会按比例自动换算 scale 兜底，但那只能
+    # 防止彻底失效，精度仍需要按实际宽度重新标定。
+    stereo_width: int = 640
+    stereo_height: int = 480
 
-    # 视差计算的频率上限。StereoBM 在 1280x480x256 上一次要上百毫秒，
-    # 跑满主循环的 30 Hz 会吃掉一个核并拖慢 PID。10 Hz 对前方障碍检测足够。
-    # 与 camera 的采集率解耦：camera 每帧更新原始帧，sampler 按这个频率取最新一帧。
+    # 视差计算的频率上限。SGBM 比原来的 StereoBM 慢，但在这个尺寸上 640x480
+    # 单次约 20-30ms（Pi 4 单核），跑满 30 Hz 会吃掉一个核并拖慢 PID，
+    # 10 Hz 对前方障碍检测足够。与 camera 的采集率解耦：camera 每帧更新原始帧，
+    # sampler 按这个频率取最新一帧。
     stereo_target_fps: int = 10
 
     # Calibration, in mm * px. This is the ONE number to measure, and it is
@@ -170,16 +205,20 @@ class DepthCameraConfig:
     #      frame (or run test_stereo_calib.py, which reads it for you).
     #   4. Set stereo_scale_mm_px = D * d.
     #
-    # IMPORTANT: this value is tied to the eye resolution. If stereo_width /
-    # stereo_height (or camera.stereo_capture_width / height) changes, the same
-    # target at the same distance produces a different disparity and the scale
-    # MUST be re-measured. The current default assumes the eye is 1280x480.
+    # IMPORTANT: this value is tied to the eye resolution in stereo_width. If
+    # stereo_width / stereo_height (or camera.stereo_capture_width / height)
+    # changes, the same target at the same distance produces a different
+    # disparity and the scale MUST be re-measured. depth_camera.py scales this
+    # number linearly with the real eye width as a safety net, but a wrong
+    # baseline would still be wrong.
+    #
+    # 39074 是从旧值 26375（432x320 单眼）按宽度线性推算的 640 宽单眼等效值，
+    # 用于把旧标定迁移过来。它不是实测值——正式比赛前请用
+    # test_stereo_calib.py 重新测量并覆盖这里。
     #
     # A scale of 0 means "not calibrated": the stereo backend refuses to start
     # and falls back to mock. That is deliberate, not a bug.
-    # Note: This value is for 432x320 single eye resolution. If you change
-    # stereo_width/stereo_height, you must re-calibrate with test_stereo_calib.py
-    stereo_scale_mm_px: float = 26375.0
+    stereo_scale_mm_px: float = 39074.0
 
     # Physical alternative to the measured scale: if the module's datasheet
     # gives the lens focal length (pixels, at the eye width set above) and the
@@ -188,17 +227,49 @@ class DepthCameraConfig:
     stereo_focal_px: float = 0.0
     stereo_baseline_mm: float = 0.0
 
-    # StereoBM parameters.
+    # 用 StereoSGBM 而不是 StereoBM。
+    #
+    # BM 对噪声极敏感：低光或者纹理少的场景（白墙、天花板）下，有效像素比会
+    # 掉到个位数，表现为"深度经常读不出"。SGBM 用平滑代价聚合，在这种场景下
+    # 能保留大量有效点，代价是慢 3-5 倍。10Hz 采样下这个代价可以接受。
+    # 设 False 可以退回 BM（用于对比排查）。
+    stereo_use_sgbm: bool = True
+
+    # Stereo matching parameters.
+    #
     # num_disparities must be divisible by 16; it is the widest pixel shift the
     # matcher searches, so it sets the CLOSEST distance the guard can resolve:
     #     closest_mm = scale_mm_px / (num_disparities - 1)
-    # 640x240 单眼用 128 disparities 足够，降低 CPU 负载。
+    # 在 640x480 单眼 + scale=39074 下，160 对应最近约 246mm，比
+    # emergency_stop_mm=300 略近，够用。大尺寸需要按比例增大。
     # The backend warns at start if that is farther than emergency_stop_mm,
-    # because obstacles inside the blind zone would never register. Raise this
-    # if the warning fires.
+    # because obstacles inside the blind zone would never register.
+    stereo_num_disparities: int = 160
+
     # block_size must be odd. Larger smooths noise but blurs thin obstacles.
-    stereo_num_disparities: int = 128
     stereo_block_size: int = 15
+
+    # SGBM 的最小视差（pixel）。通常 0 即可，只有在用了极窄基线或者需要裁掉
+    # 视野边缘的噪声时才需要抬高。
+    stereo_min_disparity: int = 0
+
+    # 唯一性比率：匹配代价最优值必须比次优值明显好，才认为这个像素有效。
+    # 越小越容易产生噪声点，越大越容易漏掉真障碍。5..15 是常见范围。
+    stereo_uniqueness_ratio: int = 10
+
+    # Speckle filter：把"孤立的小块匹配噪声"抹成 0。
+    # speckle_window_size 是判定为孤立块的最大面积，speckle_range 是允许的
+    # 视差差异。调大能把低光下的零星噪点压掉，代价是会抹掉真实的细小障碍。
+    stereo_speckle_window_size: int = 200
+    stereo_speckle_range: int = 2
+
+    # 左右一致性校验的容差（SGBM LR check 的阈值），单位是 pixel。
+    # 0 表示关闭。1-2 能有效剔除半遮挡区域的错误匹配。
+    stereo_disp12_max_diff: int = 1
+
+    # 视差图上做一次中值滤波，核大小（奇数）。1 = 关闭。
+    # 这一步同时平滑掉斑点，让 measure_obstacle_mm 的 min() 不轻易被单点触发。
+    stereo_median_blur: int = 5
 
     # ------------------------------------------------------------------
     # DECXIN / generic UVC single-stream backend ("decxin")
