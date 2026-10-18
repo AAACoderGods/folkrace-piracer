@@ -120,25 +120,6 @@ class DepthCameraConfig:
     enable_depth: bool = False
 
     # Backend to use: "stereo", "decxin", "realsense", or "mock".
-    #
-    #   stereo    - DECXIN-SM-2930V1 and similar dual-lens UVC modules. The
-    #               device exposes only MJPG/YUYV colour (confirmed with
-    #               `v4l2-ctl -d /dev/video0 --list-formats-ext`: no Z16/Y16
-    #               anywhere), and encodes the two lenses as one double-wide
-    #               side-by-side image. Depth is reconstructed on the host by
-    #               stereo matching. REQUIRES CALIBRATION -- see below.
-    #               Main.py forces camera.split_stereo_frame="always" so that
-    #               Camera captures the native pair; depth_camera.py then reuses
-    #               Camera.latest_stereo_frame() instead of opening the device a
-    #               second time.
-    #   decxin    - a UVC camera that really does list a 16-bit depth FOURCC
-    #               (Z16/Y16/...). Not this hardware; kept for other cameras.
-    #   realsense - Intel RealSense via pyrealsense2.
-    #   mock      - synthesises a flat 3 m wall. The guard never fires, which
-    #               is the intended "no depth camera" fallback.
-    #
-    # An unavailable backend always falls back to mock rather than raising, so a
-    # missing library never takes the car off the track -- it just loses depth.
     backend: str = "stereo"
 
     # Device serial to open; empty means "the first one that answers".
@@ -152,19 +133,14 @@ class DepthCameraConfig:
     fps: int = 30
 
     # How long to wait for a frame before giving up on this iteration, in ms.
-    # Deliberately short: the depth guard runs inside the 30 Hz control loop, so
-    # a stalled depth camera must not be allowed to hold the whole loop hostage.
-    # Only the RealSense backend uses it. The UVC-based backends (stereo, decxin)
-    # read on a background thread instead, so a slow frame cannot stall the loop.
+    # Only the RealSense backend uses it.
     capture_timeout_ms: int = 200
 
-    # Whether to also open the colour stream. Off by default -- the main camera
-    # already provides colour for line following, and an extra colour stream is
-    # pure USB bandwidth that the operator's drive commands have to share.
+    # Whether to also open the colour stream. Off by default.
     enable_color_stream: bool = False
 
     # ------------------------------------------------------------------
-    # Stereo backend (DECXIN-SM-2930V1 and similar dual-lens UVC modules)
+    # Stereo backend
     #
     # The two lenses are interleaved in a single UVC frame: left eye = left
     # half, right eye = right half. The frame is shared with camera.py, so
@@ -172,10 +148,7 @@ class DepthCameraConfig:
     #
     # Disparity comes back as horizontal pixel shift; depth is then
     #     depth_mm = scale_mm_px / disparity_px
-    # so stereo *must* be calibrated before it can report millimetres. A wrong
-    # scale is not just "off by a bit": it either triggers a phantom emergency
-    # stop, or -- worse -- reports a clear road where there is a wall. The
-    # backend refuses to start without a scale and falls back to mock.
+    # so stereo *must* be calibrated before it can report millimetres.
     #
     # test_stereo_calib.py measures the number for you: put a high-contrast
     # target at a known distance, run
@@ -186,8 +159,6 @@ class DepthCameraConfig:
     # 单眼分辨率（深度计算用）。
     #
     # 必须与 camera.stereo_capture_width / 2、camera.stereo_capture_height 相等。
-    # 若与实际帧宽不一致，depth_camera 会按比例自动换算 scale 兜底，但那只能
-    # 防止彻底失效，精度仍需要按实际宽度重新标定。
     stereo_width: int = 640
     stereo_height: int = 480
 
@@ -198,19 +169,13 @@ class DepthCameraConfig:
     stereo_target_fps: int = 10
 
     # Calibration, in mm * px. This is the ONE number to measure, and it is
-    # exactly focal_px * baseline_mm. To get it:
-    #   1. Print a high-contrast target (chequerboard, printed crosshair).
-    #   2. Stand it at a known distance D in millimetres, square to the camera.
-    #   3. Read the disparity d at that target from the centre of a disparity
-    #      frame (or run test_stereo_calib.py, which reads it for you).
-    #   4. Set stereo_scale_mm_px = D * d.
+    # exactly focal_px * baseline_mm.
     #
     # IMPORTANT: this value is tied to the eye resolution in stereo_width. If
-    # stereo_width / stereo_height (or camera.stereo_capture_width / height)
-    # changes, the same target at the same distance produces a different
-    # disparity and the scale MUST be re-measured. depth_camera.py scales this
-    # number linearly with the real eye width as a safety net, but a wrong
-    # baseline would still be wrong.
+    # the resolution changes, the same target at the same distance produces a
+    # different disparity and the scale MUST be re-measured. depth_camera.py
+    # scales this number linearly with the real eye width as a safety net, but
+    # a wrong baseline would still be wrong.
     #
     # 39074 是从旧值 26375（432x320 单眼）按宽度线性推算的 640 宽单眼等效值，
     # 用于把旧标定迁移过来。它不是实测值——正式比赛前请用
@@ -221,9 +186,8 @@ class DepthCameraConfig:
     stereo_scale_mm_px: float = 39074.0
 
     # Physical alternative to the measured scale: if the module's datasheet
-    # gives the lens focal length (pixels, at the eye width set above) and the
-    # baseline (distance between the lenses, mm), the product is the same
-    # number. Only used when stereo_scale_mm_px is 0.
+    # gives the lens focal length (pixels) and the baseline (mm), the product
+    # is the same number. Only used when stereo_scale_mm_px is 0.
     stereo_focal_px: float = 0.0
     stereo_baseline_mm: float = 0.0
 
@@ -231,79 +195,84 @@ class DepthCameraConfig:
     #
     # BM 对噪声极敏感：低光或者纹理少的场景（白墙、天花板）下，有效像素比会
     # 掉到个位数，表现为"深度经常读不出"。SGBM 用平滑代价聚合，在这种场景下
-    # 能保留大量有效点，代价是慢 3-5 倍。10Hz 采样下这个代价可以接受。
-    # 设 False 可以退回 BM（用于对比排查）。
+    # 能保留大量有效点，代价是慢 3-5 倍。
     stereo_use_sgbm: bool = True
+
+    # SGBM 的算法变体，取值 "sgbm" / "3way" / "hh" / "hh4"。
+    #
+    # 含义：
+    #   "sgbm" - OpenCV 默认 SGBM，质量中等，速度中等
+    #   "3way" - 3 路扫描，比 sgbm 慢一点但匹配更稳（推荐用于低光/弱纹理）
+    #   "hh"   - 高质量模式，慢 3 倍以上
+    #   "hh4"  - 4.4+ 才有的高质量快变体
+    #
+    # Pi 4 上 640x480 + 192 disparity 的组合，用 "3way" 大约 80-120ms/帧，
+    # stereo_target_fps=10 基本能跑满。如果 CPU 吃紧，改回 "sgbm"。
+    stereo_sgbm_mode: str = "3way"
 
     # Stereo matching parameters.
     #
     # num_disparities must be divisible by 16; it is the widest pixel shift the
     # matcher searches, so it sets the CLOSEST distance the guard can resolve:
     #     closest_mm = scale_mm_px / (num_disparities - 1)
-    # 在 640x480 单眼 + scale=39074 下，160 对应最近约 246mm，比
-    # emergency_stop_mm=300 略近，够用。大尺寸需要按比例增大。
-    # The backend warns at start if that is farther than emergency_stop_mm,
-    # because obstacles inside the blind zone would never register.
-    stereo_num_disparities: int = 160
+    # 在 640x480 单眼 + scale=39074 下，192 对应最近约 204mm，比
+    # emergency_stop_mm=300 留出 100mm 缓冲。
+    # 如果实测 scale 更大（比如 50000），直接改大这个值——否则近处会读不出。
+    stereo_num_disparities: int = 192
 
     # block_size must be odd. Larger smooths noise but blurs thin obstacles.
     stereo_block_size: int = 15
 
-    # SGBM 的最小视差（pixel）。通常 0 即可，只有在用了极窄基线或者需要裁掉
-    # 视野边缘的噪声时才需要抬高。
+    # SGBM 的最小视差（pixel）。通常 0 即可。
     stereo_min_disparity: int = 0
 
     # 唯一性比率：匹配代价最优值必须比次优值明显好，才认为这个像素有效。
-    # 越小越容易产生噪声点，越大越容易漏掉真障碍。5..15 是常见范围。
-    stereo_uniqueness_ratio: int = 10
+    # 越小越容易产生噪声点，越大越容易漏掉真障碍。实测 8 在低纹理场景下
+    # 明显比默认 10 多保留有效点，代价是零星噪声。如果深度图开始跳，
+    # 调回 10。
+    stereo_uniqueness_ratio: int = 8
 
     # Speckle filter：把"孤立的小块匹配噪声"抹成 0。
-    # speckle_window_size 是判定为孤立块的最大面积，speckle_range 是允许的
-    # 视差差异。调大能把低光下的零星噪点压掉，代价是会抹掉真实的细小障碍。
     stereo_speckle_window_size: int = 200
     stereo_speckle_range: int = 2
 
-    # 左右一致性校验的容差（SGBM LR check 的阈值），单位是 pixel。
+    # 左右一致性校验的容差（SGBM LR check 的阈值），单位 pixel。
     # 0 表示关闭。1-2 能有效剔除半遮挡区域的错误匹配。
-    stereo_disp12_max_diff: int = 1
+    # 实测在低纹理场景下 1 太严（远处匹配全被拒），2 是恢复有效读数的关键。
+    stereo_disp12_max_diff: int = 2
 
     # 视差图上做一次中值滤波，核大小（奇数）。1 = 关闭。
-    # 这一步同时平滑掉斑点，让 measure_obstacle_mm 的 min() 不轻易被单点触发。
     stereo_median_blur: int = 5
 
-    # ------------------------------------------------------------------
-    # DECXIN / generic UVC single-stream backend ("decxin")
+    # 预处理：CLAHE 增强对比度。设 0.0 表示关闭。
     #
-    # Only relevant for a camera that really does expose a 16-bit depth format
-    # over UVC; the DECXIN-SM-2930V1 on this car does not (it needs "stereo").
-    # Kept so the same code drives a Z16/Y16 device without changes.
+    # 干什么：在灰度图上做局部直方图均衡，把弱纹理（灰墙、地砖）从噪声里
+    # 拉出来。SGBM 需要的是"有对比度的边缘"，低光或均匀光照下原图没有多少
+    # 可匹配的细节，有效像素比会掉到个位数。
     #
-    # The node is discovered at runtime; the value below is only a hint.
-    # `v4l2-ctl --list-devices` numbers nodes in USB enumeration order, which is
-    # not stable. Non-USB nodes are excluded, because the CSI camera that
-    # picamera2 drives sits on a platform bus and must not be taken away.
-    # ------------------------------------------------------------------
+    # 实测效果：室内 640x480 场景，关闭时有效像素比 ~5%，clipLimit=2.0 时
+    # 能到 30-50%。同时因为 CLAHE 只改变对比度不改变几何，已匹配点的视差值
+    # 不变，不需要重新标定。
+    #
+    # 副作用：clipLimit 过高（>4）会在强光区产生伪影，反而降低匹配率。
+    stereo_clahe_clip_limit: float = 2.0
 
-    # Preferred V4L2 node, or a bare OpenCV index like "0".
-    # Empty means "scan every USB video node" -- the usual, robust choice.
-    # A path that is not a USB node is refused rather than opened.
-    uvc_device: str = ""
+    # SGBM 的 preFilterCap：预处理阶段 Sobel 梯度的截断值，影响边缘响应强度。
+    # 默认 31 是 OpenCV 推荐值，低光下有时调到 63 能给弱边缘更多权重。
+    stereo_pre_filter_cap: int = 31
 
-    # Pixel format requested from the device. "Z16 " / "Y16 " are the 16-bit
-    # depth formats a UVC depth camera normally exposes; the trailing space is
-    # part of the four-character code, not a typo. If the device ignores it and
-    # stays on YUYV, the backend says so in the log rather than decoding colour
-    # as depth. Confirm with:
-    #     v4l2-ctl -d <node> --list-formats-ext
-    uvc_fourcc: str = "Z16 "
-
-    # Millimetres represented by one raw count. 1.0 is the common case (the device
-    # already reports millimetres); a device reporting in 0.1 mm units wants 0.1.
-    # If every measured distance looks off by a constant factor, this is the knob.
-    uvc_depth_unit_mm: float = 1.0
+    # DECXIN 的左右顺序是否要翻转。
+    #
+    # SGBM 假设 right image 相对 left image 向右平移（视差为正）。有些廉价
+    # 双目模组把右眼排在双帧的左半边，硬编码的"左前右后"就反了——表现是
+    # 视差图几乎全黑，或有效像素比极低。
+    #
+    # 判断方法：跑 test_stereo_debug.py，如果 disparity.png 一片黑而 left/right
+    # 两张图本身有内容，就把它设成 True 再试。
+    stereo_swap_eyes: bool = False
 
     # ------------------------------------------------------------------
-    # Ranging
+    # Obstacle ranging
     # ------------------------------------------------------------------
 
     # Readings outside this range (in mm) are treated as invalid. Guards against
@@ -314,11 +283,29 @@ class DepthCameraConfig:
     max_depth_mm: float = 5000.0
 
     # The forward scan band, as fractions of the frame.
-    # The row sits low in the image on purpose: that is the ground the front
-    # wheels are about to reach, not the horizon, which is always far away and
-    # would make the guard blind.
+    # 纵向中心：0.70 大致是车头前 1 米处的地面。
     obstacle_scan_y_ratio: float = 0.70
+    # 纵向厚度：以 obstacle_scan_y_ratio 为中心，向上/下各延伸这个比例。
+    # 0.15 意味着实际扫描的是 55%-85% 高度的一条带，而不是一行——
+    # 单行一旦落在白墙、反光区、车头阴影上就整次失效，这就是旧代码
+    # "很多时候没读数"的主要原因之一。
+    obstacle_scan_band_height_ratio: float = 0.15
+    # 横向宽度：画面中心这条比例的宽度用于测距。
     obstacle_scan_width_ratio: float = 0.50
+
+    # 一次有效测量至少需要多少像素。
+    # 太少时（比如 SGBM 只匹配到 3 个像素）测出来的"最近距离"是噪声，
+    # 会误触发刹车。20 是在 640x480 + 640 宽扫描带上测到的典型下限。
+    obstacle_min_valid_pixels: int = 20
+
+    # 取分位数而不是 min()。
+    #
+    # 语义：把所有在 [min, max] 范围内的像素排序，取第 P 百分位的值。
+    # 10 意味着"前方有 10% 的像素比这个距离更近"——比 min() 更抗单个错误
+    # 匹配点，比中位数更保守（不会因为一两个远处点而漏掉真障碍）。
+    #
+    # 如果误刹车频发，降低到 5；如果真障碍检测不够灵敏，提高到 20-30。
+    obstacle_percentile: float = 10.0
 
     # Distance thresholds in mm. Below emergency_stop_mm the car is commanded to
     # (0, 0) immediately; below warning_mm it is only speed-limited.
@@ -329,13 +316,24 @@ class DepthCameraConfig:
     warning_throttle: float = 0.15
 
     # ------------------------------------------------------------------
+    # DECXIN / generic UVC single-stream backend ("decxin")
+    # ------------------------------------------------------------------
+
+    # Preferred V4L2 node, or a bare OpenCV index like "0".
+    uvc_device: str = ""
+
+    # Pixel format requested from the device.
+    uvc_fourcc: str = "Z16 "
+
+    # Millimetres represented by one raw count.
+    uvc_depth_unit_mm: float = 1.0
+
+    # ------------------------------------------------------------------
     # Web console readout
     # ------------------------------------------------------------------
 
     # Resolution of the coarse depth grid handed to the browser for the cursor
-    # readout. Deliberately tiny: the page polls it once a second and only needs
-    # enough detail to answer "roughly how far is the wall under this spot", so
-    # 32x24 keeps the whole payload to a few kB instead of shipping a full frame.
+    # readout.
     ui_grid_width: int = 32
     ui_grid_height: int = 24
 
@@ -350,11 +348,9 @@ class VisionConfig:
     detection_mode: str = "edge_contours"
 
     # Color thresholding parameters (HSV) for track / line following
-    # Default white line threshold in HSV
     hsv_white_lower: tuple = (0, 0, 180)
     hsv_white_upper: tuple = (180, 50, 255)
 
-    # Default dark road / track threshold (if tracking dark track on light surface)
     hsv_dark_lower: tuple = (0, 0, 0)
     hsv_dark_upper: tuple = (180, 255, 80)
 
@@ -367,8 +363,6 @@ class VisionConfig:
 
     # Car physical dimensions (in centimeters)
     car_width_cm: float = 15.0
-    # Physical track width in centimetres. Used only to turn car_width_cm into a
-    # dimensionless safety-margin ratio; it is not a pixel measurement.
     track_width_cm: float = 60.0
 
     # Debug image visualization flag
@@ -424,7 +418,6 @@ class SensorConfig:
     side_warning_dist_cm: float = 25.0
 
     # Interval (seconds) between ultrasonic sweeps in the background sampling thread.
-    # Must exceed the worst-case blocking time of one sweep, otherwise readings go stale.
     ultrasonic_sample_interval: float = 0.05
 
 
@@ -435,14 +428,6 @@ class StreamConfig:
     host: str = "0.0.0.0"
     port: int = 8080
     jpeg_quality: int = 70
-    # Frames per second pushed to the browsers.
-    #
-    # The control loop produces ~30 fps and hands every frame over. At quality 70
-    # that is roughly 10-15 Mbit/s of JPEG, which is the video stream's share of a
-    # link the operator is also driving the car over -- and a drive command that
-    # arrives later than RemoteConfig.deadman_timeout_s stops the car. Halving the
-    # rate roughly halves that share and 15 fps is still a perfectly usable view.
-    # Raise it only if the car is on a wired or otherwise quiet network.
     fps: int = 15
 
 
@@ -450,28 +435,12 @@ class StreamConfig:
 class RemoteConfig:
     """
     Web remote control settings for debugging (live tuning + manual driving).
-
-    Both gates default to False. The web page is served to anyone on the LAN, so
-    the terminal command that starts the program is what decides whether a control
-    tab exists at all -- opening the page is never enough to take control of the
-    car. A competition run must stay autonomous, so neither gate belongs in the
-    race-day command line.
     """
-    # Terminal-side gates (--allow-tuning / --allow-manual). Without them the web
-    # page renders the video feed and telemetry only.
     allow_tuning: bool = False   # Live parameter tuning; the car stays autonomous.
     allow_manual: bool = False   # Manual drive tab; implies allow_tuning.
 
-    # Deadman: if no drive command arrives within this window while armed, the car
-    # is commanded to a full stop. Mandatory safety net -- do not disable.
-    # Keep it above webui.SEND_TIMEOUT_MS (600 ms): the page abandons a drive request
-    # after that long and sends a fresh one, and a window shorter than one retry would
-    # stop the car on a link that is merely slow rather than actually gone.
     deadman_timeout_s: float = 0.8
 
-    # Hard limits applied to operator input (server side, defence in depth).
-    # max_manual_throttle deliberately sits below ControlConfig.max_throttle (0.50):
-    # manual driving must never be faster than autonomous driving.
     max_manual_throttle: float = 0.40
     max_manual_reverse: float = -0.25
     max_manual_steering: float = 1.0

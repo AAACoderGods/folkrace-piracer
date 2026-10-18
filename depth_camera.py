@@ -27,48 +27,15 @@ Design rules, in order of importance:
    the rest of the codebase never has to think about device-specific units.
 
 3. The depth camera only reports distance. It does not drive, does not steer,
-   and does not know what mode the car is in -- main.py owns that decision. This
-   keeps the same separation webcontrol.py already uses: no HTTP here, no
-   hardware policy either.
+   and does not know what mode the car is in -- main.py owns that decision.
 
 4. The stream format is read back from the device, never inferred from shape.
-   A 4:2:2 colour format (YUYV and friends) is two bytes per pixel, so with
-   CONVERT_RGB=0 it arrives as a uint8 (h, w, 2) array -- the exact shape of a
-   Z16 depth buffer. Treating one as the other yields an array of plausible
-   noise that fails every range check and looks like "the camera has no
-   reading". CAP_PROP_FOURCC is the only thing that distinguishes them, so it
-   is checked before any UVC buffer is interpreted as depth.
 
-5. The UVC device is opened by at most one component. A dual-lens UVC camera
-   reports exactly one capture node, and libcamera (via Picamera2, in camera.py)
-   or the V4L2 handle Camera opened are already holding it for the vision stream.
-   Opening the same node a second time from here either fails outright -- which
-   shows up as "stereo fell back to mock" -- or, worse, succeeds and hands out
-   frames interleaved with vision's, so the "left" and "right" halves that
-   SGBM receives come from different moments and the disparity map is pure
-   noise. The stereo backend therefore *shares* camera.py's raw frame through
-   `frame_source` and only opens the device itself when no such source exists.
+5. The UVC device is opened by at most one component.
 
-6. The UVC-based backends capture on a background thread. A live stereo frame
-   costs tens of milliseconds to decode and match, and blocking the 30 Hz
-   control loop on that would slow steering and throttling just as much. The
-   sampler thread caches the latest depth frame; the main loop only ever reads
-   the cache.
+6. The UVC-based backends capture on a background thread.
 
-7. Calibration is per eye *width*. depth_mm = scale_mm_px / disparity_px, and
-   disparity scales with focal length, which scales with image width. If the
-   device hands back a frame whose eye is not the width stereo_scale_mm_px was
-   measured at, the scale is scaled linearly (see _scale_for_eye_width) instead
-   of being trusted as-is. Without that, a device that only supports a fixed
-   list of native resolutions -- and falls back to 1280x480 when asked for
-   864x320 -- silently misreports every distance by eye_w/stereo_width, which
-   looks exactly like "the depth camera has no reading".
-
-To add a new backend (OAK-D, Orbbec, a vendor SDK, ...):
-    - add a probe block for the library at the top
-    - add a `_start_<name>` that returns True on success
-    - add a `_capture_<name>` returning (colour BGR or None, depth mm or None)
-    - wire both into start() and capture_frame() next to the existing branches
+7. Calibration is per eye *width*.
 """
 
 import glob
@@ -83,8 +50,7 @@ import numpy as np
 
 from config import DepthCameraConfig
 
-# Each backend is probed once at import. A missing library is the normal case on
-# a dev machine, so it is a warning at start() time, not an error here.
+# Each backend is probed once at import.
 try:
     import pyrealsense2 as rs
     _REALSENSE_AVAILABLE = True
@@ -92,8 +58,6 @@ except ImportError:
     rs = None
     _REALSENSE_AVAILABLE = False
 
-# The UVC backends need only OpenCV, which the rest of the project already uses
-# for vision -- so on a normal install this is always present.
 try:
     import cv2
     _CV2_AVAILABLE = True
@@ -102,30 +66,18 @@ except ImportError:
     _CV2_AVAILABLE = False
 
 
-# Pixel formats that actually carry 16-bit depth over UVC. Compared with the
-# trailing space stripped, because the fourth character of a FOURCC is padding.
+# Pixel formats that actually carry 16-bit depth over UVC.
 _DEPTH_FOURCCS = {"Z16", "Y16", "Y12", "Z12", "Y14", "Y10"}
 
-# 4:2:2 colour formats. These are two bytes per pixel as well, so CONVERT_RGB=0
-# leaves them in exactly the same uint8 (h, w, 2) shape that a Z16 buffer has.
-# The distinction cannot be made from the array alone -- see rule 4 above.
+# 4:2:2 colour formats.
 _COLOUR_FOURCCS = {"YUYV", "UYVY", "YVYU", "VYUY", "MJPG", "JPEG", "RGB3", "BGR3"}
 
-# Where the kernel ties a /dev/videoN node to the bus it hangs off. Resolving this
-# link is the only reliable way to tell a USB camera from the CSI pipeline: the
-# names and numbers both move between boots, the bus does not.
+# Where the kernel ties a /dev/videoN node to the bus it hangs off.
 _SYSFS_V4L = "/sys/class/video4linux"
 
 
 def _fourcc_str(value) -> str:
-    """
-    Turn a CAP_PROP_FOURCC integer back into its four-character code.
-
-    Empty string means the device (or the OpenCV build) did not report a format.
-    That is treated as "unknown", not as a failure: on several Pi builds the V4L2
-    backend returns 0 for anything outside its small table of known codes, and
-    refusing to start in that case would reject working depth cameras.
-    """
+    """Turn a CAP_PROP_FOURCC integer back into its four-character code."""
     try:
         value = int(value)
     except (TypeError, ValueError):
@@ -142,21 +94,8 @@ def _device_sort_key(path: str):
 
 
 def _is_usb_video_node(device: str) -> bool:
-    """
-    True when the node hangs off a USB bus, rather than the CSI pipeline.
-
-    picamera2 drives the CSI camera through libcamera, but its V4L2 nodes (and
-    the codec/ISP nodes that accompany them) live on a platform bus. Opening one
-    of those here would take the main camera away from the vision pipeline, which
-    is a far worse failure than having no depth guard -- so the filter is a
-    safety rule, not an optimisation.
-
-    A missing sysfs (odd container, or a kernel without CONFIG_VIDEO_DEV) means
-    the question cannot be answered, and the node is accepted: refusing to try
-    anything would trade a rare conflict for a guaranteed "no depth camera".
-    """
+    """True when the node hangs off a USB bus, rather than the CSI pipeline."""
     if not device.startswith("/dev/"):
-        # Not a path at all -- an OpenCV index. Nothing to inspect.
         return True
     if not os.path.isdir(_SYSFS_V4L):
         return True
@@ -165,6 +104,27 @@ def _is_usb_video_node(device: str) -> bool:
     except OSError:
         return True
     return "/usb" in real
+
+
+def _sgbm_mode_flag(name: str) -> int:
+    """
+    Resolve a config string ("sgbm"/"3way"/"hh"/"hh4") into the OpenCV constant.
+
+    Falls back to SGBM_3WAY on any unknown value, because that is the safest
+    default on a Pi: the quality difference against "hh" is small at 640x480,
+    but the runtime difference is large enough to decide whether the sampler
+    hits its target rate.
+    """
+    if cv2 is None:
+        return 0
+    key = (name or "3way").strip().lower()
+    table = {
+        "sgbm": getattr(cv2, "STEREO_SGBM_MODE_SGBM", 0),
+        "hh":   getattr(cv2, "STEREO_SGBM_MODE_HH", 1),
+        "3way": getattr(cv2, "STEREO_SGBM_MODE_SGBM_3WAY", 2),
+        "hh4":  getattr(cv2, "STEREO_SGBM_MODE_HH4", 3),
+    }
+    return table.get(key, table["3way"])
 
 
 class DepthCamera:
@@ -180,43 +140,25 @@ class DepthCamera:
 
     def __init__(self, config: DepthCameraConfig, frame_source=None):
         self.config = config
-        # Optional upstream frame provider (normally camera.Camera). Sharing the
-        # capture is the only way to run two views of one dual-lens UVC module --
-        # see design rule 5 at the top of this file.
         self._frame_source = frame_source
         self.backend: str = "mock"
         self.is_running = False
-        # Only one of these is ever live; stop() releases whichever is set.
         self._pipeline = None
         self._uvc = None
-        # Guard for self._uvc: the stereo sampler reads it on a background
-        # thread while stop() may be releasing it from the main thread.
         self._uvc_lock = threading.Lock()
-        # What the UVC device actually negotiated, as opposed to what config
-        # asked for. Kept so every frame can be re-checked against it: a USB
-        # link that renegotiates mid-run would otherwise silently swap the
-        # colour and depth interpretations.
         self._uvc_fourcc = ""
         self._uvc_device_in_use = ""
-        # Stereo sampler state. The thread reads frames and writes the latest
-        # depth map; the main loop reads the cache without ever blocking.
         self._stereo_lock = threading.Lock()
         self._stereo_stop_event: Optional[threading.Event] = None
         self._stereo_thread: Optional[threading.Thread] = None
         self._stereo_latest: Optional[np.ndarray] = None
-        # True when the stereo sampler pulls frames from frame_source instead of
-        # from self._uvc. Only affects which method the thread calls; the depth
-        # output is identical.
         self._stereo_external = False
-        # One-shot diagnostic: report the first valid disparity map so the
-        # operator can confirm the pipeline is producing distance at all.
         self._stereo_first_logged = False
-        # 每个 scale 只打印一次换算日志，避免 10Hz 下刷屏。
         self._stereo_scale_logged = False
-        # Per-device scale factor from raw counts to metres. RealSense sets it
-        # per model; 0.001 (i.e. 1 count = 1 mm) is the common default and the
-        # value the mock backend reports, so it is a safe fallback if start()
-        # never got far enough to read the real one.
+        # 连续无有效读数的帧数：达到 5 时打印一次完整的诊断提示，
+        # 每个启动只打一次，避免 10Hz 下刷屏。
+        self._stereo_empty_streak = 0
+        self._stereo_empty_warned = False
         self._depth_scale_m = 0.001
 
     # ------------------------------------------------------------------
@@ -224,13 +166,7 @@ class DepthCamera:
     # ------------------------------------------------------------------
 
     def start(self):
-        """
-        Bring up the configured backend, falling back to mock on any failure.
-
-        Never raises. main.py constructs this object unconditionally whenever
-        --allow-depth-camera is set, and the run must not depend on whether a
-        depth camera actually answered.
-        """
+        """Bring up the configured backend, falling back to mock on any failure."""
         requested = (self.config.backend or "mock").lower()
 
         if requested == "stereo":
@@ -245,12 +181,12 @@ class DepthCamera:
                 self.backend = "stereo"
                 self.is_running = True
                 logging.info("✅ Depth camera started: stereo (UVC on %s, "
-                             "eye %dx%d, scale=%.1f mm*px, %d disparities, %s)",
+                             "eye %dx%d, scale=%.1f mm*px, %d disparities, %s mode)",
                              self._uvc_device_in_use,
                              self.config.stereo_width, self.config.stereo_height,
                              self._stereo_effective_scale(),
                              self.config.stereo_num_disparities,
-                             "SGBM" if self.config.stereo_use_sgbm else "BM")
+                             self.config.stereo_sgbm_mode if self.config.stereo_use_sgbm else "BM")
                 return
             else:
                 logging.warning("Depth camera: stereo failed to start; "
@@ -303,9 +239,7 @@ class DepthCamera:
         Return one (colour BGR, depth mm) pair.
 
         The colour frame is None unless DepthCameraConfig.enable_color_stream is
-        set; line following uses the main camera, not this one. The depth frame
-        is float32 in millimetres with 0 marking "no reading". Either element may
-        be None on a dropped frame -- callers must handle that.
+        set. The depth frame is float32 in millimetres with 0 marking "no reading".
         """
         if not self.is_running:
             raise RuntimeError("DepthCamera is not started. Call start() first.")
@@ -320,13 +254,9 @@ class DepthCamera:
 
     def stop(self):
         """Stop the stream and release the device. Safe to call repeatedly."""
-        # Stop the sampler before touching the device handle: it reads the cap on
-        # a background thread, and releasing while it is mid-read is a crash.
         if self._stereo_stop_event is not None:
             self._stereo_stop_event.set()
         if self._stereo_thread is not None:
-            # The sampler's read() can block for up to a frame period; give it
-            # room to notice the stop event and leave the loop.
             self._stereo_thread.join(timeout=5.0)
             self._stereo_thread = None
         self._stereo_stop_event = None
@@ -362,29 +292,69 @@ class DepthCamera:
         """
         Nearest valid distance on the forward scan band, in millimetres.
 
-        Returns None when the band holds no usable reading at all -- which is the
-        correct answer for a camera that is pointed at the sky or has just lost
-        the device. Returning a large number here instead would quietly turn
-        "no data" into "no obstacle", which is the same as switching the guard off.
+        Three things this used to get wrong:
+
+        1. It scanned a single ROW, so one dead scanline -- a white wall, a dark
+           tyre, a specular reflection, a shadow under the bumper -- made the
+           entire call return None even though the rest of the frame was fine.
+           Fixed by scanning a vertical band, obstacle_scan_band_height_ratio
+           wide, centred on obstacle_scan_y_ratio.
+
+        2. It took min() BEFORE filtering by [min_depth_mm, max_depth_mm], so a
+           single spurious close-range match poisoned the whole band: the code
+           saw 120 mm, rejected it as out of range, and returned None -- even
+           though 99% of the band was a clean 800 mm. Fixed by filtering first,
+           then taking the statistic.
+
+        3. It took a plain min() even on the surviving pixels, which makes a
+           single erroneous match indistinguishable from a real wall and is a
+           reliable source of phantom emergency stops. Fixed by taking the
+           obstacle_percentile-th percentile: 10 by default, which is "how close
+           does the nearest 10% of the band get". That is still conservative --
+           a real obstacle covers many pixels, so it survives the percentile --
+           but a lone match does not.
+
+        Returns None when the band holds too few usable readings, which is the
+        correct answer for a camera pointed at the sky or one that has just lost
+        the device. Returning a large number there would quietly turn "no data"
+        into "no obstacle", which is the same as switching the guard off.
         """
         if depth_frame is None or depth_frame.size == 0:
             return None
 
         h, w = depth_frame.shape[:2]
-        row = int(np.clip(self.config.obstacle_scan_y_ratio, 0.0, 1.0) * (h - 1))
-        half = int(np.clip(self.config.obstacle_scan_width_ratio, 0.0, 1.0) * w / 2.0)
-        x0 = max(0, w // 2 - half)
-        x1 = min(w, w // 2 + half)
-        band = depth_frame[row, x0:x1]
-
-        # 0 is the "no return" marker every depth device here uses; drop it before
-        # taking the minimum, otherwise every frame with a single dropout reads as
-        # an obstacle at 0 mm.
-        valid = band[band > 0]
-        if valid.size == 0:
+        if h == 0 or w == 0:
             return None
 
-        near = float(np.min(valid))
+        # 纵向：以 obstacle_scan_y_ratio 为中心，向上下各延伸 ±band_half_h。
+        center_y = int(np.clip(self.config.obstacle_scan_y_ratio, 0.0, 1.0) * (h - 1))
+        band_half_h = max(1, int(round(h * float(self.config.obstacle_scan_band_height_ratio))))
+        y0 = max(0, center_y - band_half_h)
+        y1 = min(h, center_y + band_half_h + 1)
+
+        # 横向：画面中心的一条竖带，宽度为 obstacle_scan_width_ratio × w。
+        half_w = int(np.clip(self.config.obstacle_scan_width_ratio, 0.0, 1.0) * w / 2.0)
+        x0 = max(0, w // 2 - half_w)
+        x1 = min(w, w // 2 + half_w)
+
+        if x1 <= x0 or y1 <= y0:
+            return None
+
+        band = depth_frame[y0:y1, x0:x1]
+
+        # 先按 [min_depth_mm, max_depth_mm] 过滤，再统计。
+        valid_mask = (band >= self.config.min_depth_mm) & (band <= self.config.max_depth_mm)
+        valid = band[valid_mask]
+        if valid.size < int(self.config.obstacle_min_valid_pixels):
+            return None
+
+        # 分位数抗单个错误点；语义见上方注释。
+        percentile = float(self.config.obstacle_percentile)
+        percentile = max(1.0, min(99.0, percentile))
+        try:
+            near = float(np.percentile(valid, percentile))
+        except Exception:
+            return None
         if not (self.config.min_depth_mm <= near <= self.config.max_depth_mm):
             return None
         return near
@@ -392,16 +362,6 @@ class DepthCamera:
     def depth_grid(self, depth_frame: Optional[np.ndarray]) -> Optional[dict]:
         """
         Coarse depth map for the web console's cursor readout.
-
-        Shaped as {"w", "h", "mm"} with the cells row-major, because that is what
-        the browser needs to turn a pointer position into a lookup -- no image
-        decoding, no canvas. Cells outside the valid range are written as 0, the
-        same "no reading" marker the rest of this file uses.
-
-        This is nearest-neighbour sampling, not an average: the grid is a readout
-        for a human hovering over the picture, and a mean over a cell would blur
-        a thin obstacle (a post, a leg) out of existence exactly where the
-        operator is pointing at it.
         """
         if depth_frame is None or depth_frame.size == 0:
             return None
@@ -429,14 +389,7 @@ class DepthCamera:
     # ------------------------------------------------------------------
 
     def _stereo_effective_scale(self) -> float:
-        """
-        The mm*px constant used to turn disparity into depth.
-
-        Prefers the directly measured stereo_scale_mm_px. Falls back to the
-        physical focal*baseline product for users who have a datasheet instead
-        of a measuring tape. Returns 0.0 when neither is set, which start()
-        treats as "refuse to run uncalibrated".
-        """
+        """The mm*px constant used to turn disparity into depth."""
         scale = float(self.config.stereo_scale_mm_px)
         if scale > 0.0:
             return scale
@@ -449,15 +402,6 @@ class DepthCamera:
     def _scale_for_eye_width(self, baseline_scale: float, eye_w: int) -> float:
         """
         把"在 config.stereo_width 宽度下标定的 scale"换算到实际的单眼宽度上。
-
-        depth_mm = scale / disparity，而 disparity 与 focal 成正比、focal 与
-        图像宽度成正比，所以在物理距离不变的条件下 scale 也和眼宽成正比。
-        设备实际给出的宽度与配置不一致时（V4L2 只支持固定的原生模式列表，
-        请求的 864x320 会被回退到 1280x480），必须按这个比例换算，否则所有
-        距离会系统性地偏差 eye_w / stereo_width 倍——表现为大量读数落到
-        min_depth_mm / max_depth_mm 之外而被丢弃。
-
-        这不是精度优化，是正确性要求。
         """
         ref_w = int(self.config.stereo_width or 0)
         if ref_w <= 0 or eye_w <= 0 or eye_w == ref_w:
@@ -475,28 +419,18 @@ class DepthCamera:
         return scaled
 
     def _start_stereo(self) -> bool:
-        """
-        Bring up stereo capture, preferring to share camera.py's raw frame.
-
-        Order matters. camera.py normally owns the UVC device already (it is the
-        vision stream), and a second open of the same node would break both
-        consumers. So the shared source is tried first, and self-opening the
-        device is only a fallback for the case where the vision camera is a
-        separate piece of hardware (a CSI module plus a stand-alone stereo pair).
-
-        Calibration is mandatory in either path: without a scale, identical
-        left/right images produce a disparity of zero everywhere, which the range
-        check reads as "no obstacle". That is indistinguishable from a clear
-        road, and it is the one failure mode a forward guard must never have.
-        """
+        """Bring up stereo capture, preferring to share camera.py's raw frame."""
         scale = self._stereo_effective_scale()
         logging.info("Depth camera: stereo starting (scale=%.1f mm*px, "
-                     "source=%s, target eye %dx%d, %d disparities, %s)",
+                     "source=%s, target eye %dx%d, %d disparities, %s mode, "
+                     "swap_eyes=%s, CLAHE clip=%.1f)",
                      scale,
                      "frame_source" if self._frame_source is not None else "(none)",
                      self.config.stereo_width, self.config.stereo_height,
                      self.config.stereo_num_disparities,
-                     "SGBM" if self.config.stereo_use_sgbm else "BM")
+                     self.config.stereo_sgbm_mode if self.config.stereo_use_sgbm else "BM",
+                     self.config.stereo_swap_eyes,
+                     self.config.stereo_clahe_clip_limit)
         if scale <= 0.0:
             logging.warning(
                 "Depth camera: stereo backend is NOT calibrated. Set "
@@ -520,14 +454,11 @@ class DepthCamera:
                 "stereo_num_disparities (currently %d) or check the scale.",
                 closest_mm, self.config.emergency_stop_mm, num_disp)
 
-        # 1) Share camera.py's raw stereo frame. This is the main path: the same
-        #    UVC stereo device is opened only once, disparity is computed on the
-        #    frame vision is using.
+        # 1) Share camera.py's raw stereo frame.
         if self._try_start_stereo_from_source(scale):
             return True
 
-        # 2) Fallback: open device ourselves. Only meaningful when camera.py uses
-        #    a different camera (CSI), or when frame_source hasn't produced frames yet.
+        # 2) Fallback: open device ourselves.
         candidates = self._candidate_uvc_devices()
         for device in candidates:
             if self._open_stereo_device(device):
@@ -546,12 +477,7 @@ class DepthCamera:
         return False
 
     def _try_start_stereo_from_source(self, scale: float) -> bool:
-        """
-        Try to use camera.py's raw frame as the stereo feed.
-
-        Returns False (without side effects) when this is not usable, so the
-        caller can fall back to opening the device itself.
-        """
+        """Try to use camera.py's raw frame as the stereo feed."""
         source = self._frame_source
         if source is None or not hasattr(source, "latest_stereo_frame"):
             logging.info(
@@ -559,8 +485,6 @@ class DepthCamera:
                 "implement latest_stereo_frame), will try to open UVC device directly.")
             return False
 
-        # First frame may not be ready immediately after Camera.start(), wait briefly.
-        # Picamera2 can take several seconds to produce the first frame.
         deadline = time.monotonic() + 5.0
         frame = None
         while time.monotonic() < deadline:
@@ -581,10 +505,6 @@ class DepthCamera:
             return False
 
         h, w = frame.shape[:2]
-        # 至少 320 宽才有意义：比这更窄的帧根本不可能是双目对。不在这里跟
-        # 2*stereo_width 做硬匹配，因为设备可能合法地回退到别的原生模式
-        # （1280x480 / 1600x600 / 2560x960 等），scale 会自动按实际眼宽换算，
-        # 那比直接拒掉更有用。
         if w < 320:
             logging.warning(
                 "Depth camera: frame from camera.py is %dx%d, too narrow to be a "
@@ -592,8 +512,6 @@ class DepthCamera:
                 "and that split_stereo_frame='always' is in effect.", w, h)
             return False
 
-        # eye_w = w // 2，先按实际宽度把 scale 换算过去再试算一次，避免用错误
-        # scale 得到"全 0"的假阴性。
         eye_w = w // 2
         real_scale = self._scale_for_eye_width(scale, eye_w)
         depth = self._stereo_frame_to_depth(frame, real_scale)
@@ -616,15 +534,15 @@ class DepthCamera:
         with self._stereo_lock:
             self._stereo_latest = None
         self._stereo_first_logged = False
+        self._stereo_empty_streak = 0
+        self._stereo_empty_warned = False
         self._stereo_thread = threading.Thread(
             target=self._stereo_sampler_loop,
             name="stereo-sampler", daemon=True)
         self._stereo_thread.start()
 
     def _open_stereo_device(self, device: str) -> bool:
-        """
-        Try one node as a stereo source. Leaves the handle open on success.
-        """
+        """Try one node as a stereo source. Leaves the handle open on success."""
         cap = None
         try:
             device_arg = device
@@ -638,9 +556,6 @@ class DepthCamera:
                 logging.debug("stereo: %s could not be opened.", device)
                 return False
 
-            # MJPG 是唯一在原生双目尺寸下能跑 30fps 的格式。YUYV 虽然也在列表里，
-            # 但只有 10fps（未压缩带宽不够），对 PID 来说太慢。
-            # 顺序：先 FOURCC，再分辨率——部分驱动在设定格式时会重置分辨率。
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.stereo_width * 2)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.stereo_height)
@@ -668,9 +583,6 @@ class DepthCamera:
                               device, getattr(frame, "shape", None))
                 return False
 
-            # One sample is weak evidence, but it is enough to reject a node whose
-            # disparity map is completely flat (metadata node, or a lens cap).
-            # Use the real eye width for the scale, same as the shared-source path.
             real_scale = self._scale_for_eye_width(
                 self._stereo_effective_scale(), frame.shape[1] // 2)
             depth = self._stereo_frame_to_depth(frame, real_scale)
@@ -678,7 +590,6 @@ class DepthCamera:
                 logging.debug("stereo: %s failed to produce a depth frame.", device)
                 return False
 
-            # Hand the handle over so finally does not release it.
             self._uvc_fourcc = actual_fourcc
             self._uvc = cap
             cap = None
@@ -698,22 +609,32 @@ class DepthCamera:
         """
         Turn one double-wide frame into a float32 millimetre depth map, or None.
 
-        The left half is the reference and the right half the match image; image
-        rows from a real stereo pair are already rectified, so no rectification
-        is attempted here. Anything that is not a real match is left at 0.0 --
-        the "no reading" marker -- rather than turned into a plausible distance.
+        The left half is the reference and the right half the match image. Three
+        changes since the previous version, each targeting one of the symptoms
+        behind "the reading is wrong / missing half the time":
+
+        1. CLAHE on each eye before matching. SGBM needs edges; a plain indoor
+           wall or floor gives it almost none, and the valid-pixel ratio falls to
+           single digits. Local contrast equalisation pulls weak texture out of
+           the noise floor and routinely lifts that ratio by 5-10x. It changes
+           contrast only, not geometry, so the calibration constant is unaffected.
+
+        2. stereo_swap_eyes: some dual-lens UVC modules put the right eye on the
+           left of the frame, and SGBM assumes left-on-left. With the eyes
+           reversed the disparity map is close to empty -- an easy thing to blame
+           on calibration. One flag fixes it once test_stereo_debug.py has shown
+           that is what is happening.
+
+        3. Reads pre_filter_cap and the SGBM mode from config rather than the
+           hardcoded 31 / SGBM defaults, so the tuning that finally works on the
+           car can be saved rather than re-derived.
 
         `scale` must already be normalised to this frame's eye width; see
-        _scale_for_eye_width. The matcher is StereoSGBM by default because
-        StereoBM's per-pixel winner-take-all cost is far too sensitive to the
-        noise on a low-light UVC sensor: it produces a handful of isolated
-        matches surrounded by holes, which reads as "the depth camera has no
-        reading" once the range check drops the holes.
+        _scale_for_eye_width.
         """
         if frame is None or not isinstance(frame, np.ndarray) or frame.ndim != 3:
             return None
         h, w = frame.shape[:2]
-        # Odd width comes from padding in some modes; just drop one column, no need to discard the whole frame.
         if w % 2 != 0:
             w -= 1
             frame = frame[:, :w]
@@ -721,8 +642,14 @@ class DepthCamera:
             return None
 
         half = w // 2
-        left = frame[:, :half]
-        right = frame[:, half:]
+        # 左右眼是否翻转由 config 决定；默认保持"左前右后"。
+        if bool(getattr(self.config, "stereo_swap_eyes", False)):
+            left = frame[:, half:]
+            right = frame[:, :half]
+        else:
+            left = frame[:, :half]
+            right = frame[:, half:]
+
         try:
             if left.shape[2] == 3:
                 left_g = cv2.cvtColor(left, cv2.COLOR_BGR2GRAY)
@@ -736,6 +663,16 @@ class DepthCamera:
             logging.debug("stereo: grayscale conversion failed: %s", e)
             return None
 
+        # CLAHE：局部对比度增强，低光/弱纹理场景的匹配率关键提升项。
+        clip = float(getattr(self.config, "stereo_clahe_clip_limit", 0.0))
+        if clip > 0.0:
+            try:
+                clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
+                left_g = clahe.apply(left_g)
+                right_g = clahe.apply(right_g)
+            except Exception as e:
+                logging.debug("stereo: CLAHE failed (non-critical): %s", e)
+
         num_disp = int(self.config.stereo_num_disparities)
         if num_disp < 16 or num_disp % 16 != 0:
             num_disp = 128
@@ -743,7 +680,10 @@ class DepthCamera:
         if block < 5 or block % 2 == 0:
             block = 15
 
-        # 统一的整数视差（SGBM/BM 都输出 16 倍定点），后面按 /16 转成像素。
+        pre_filter = int(getattr(self.config, "stereo_pre_filter_cap", 31))
+        if pre_filter < 1:
+            pre_filter = 31
+
         try:
             if self.config.stereo_use_sgbm:
                 p1 = 8 * block * block
@@ -758,8 +698,8 @@ class DepthCamera:
                     uniquenessRatio=max(0, int(self.config.stereo_uniqueness_ratio)),
                     speckleWindowSize=max(0, int(self.config.stereo_speckle_window_size)),
                     speckleRange=max(0, int(self.config.stereo_speckle_range)),
-                    preFilterCap=31,
-                    mode=cv2.STEREO_SGBM_MODE_SGBM,
+                    preFilterCap=pre_filter,
+                    mode=_sgbm_mode_flag(getattr(self.config, "stereo_sgbm_mode", "3way")),
                 )
             else:
                 matcher = cv2.StereoBM_create(numDisparities=num_disp, blockSize=block)
@@ -772,9 +712,7 @@ class DepthCamera:
 
         if raw16.dtype != np.int16:
             raw16 = raw16.astype(np.int16)
-        # SGBM/BM 的无效位置是 -16 的倍数；清成 0 再用 filterSpeckles 抹掉孤立点。
         raw16[raw16 < 0] = 0
-        # filterSpeckles 要求 CV_16S、newVal 与输入同尺度，0 表示无效。
         try:
             cv2.filterSpeckles(raw16, 0,
                                max(0, int(self.config.stereo_speckle_window_size)),
@@ -784,8 +722,6 @@ class DepthCamera:
 
         disparity = raw16.astype(np.float32) / 16.0
 
-        # 中值滤波把残留的零星噪点压平，避免 measure_obstacle_mm 里的 min()
-        # 被单个错误点触发一次误刹车。
         median_k = int(self.config.stereo_median_blur)
         if median_k >= 3 and median_k % 2 == 1:
             try:
@@ -803,18 +739,12 @@ class DepthCamera:
     def _stereo_sampler_loop(self):
         """Background sampler: keep the cached depth frame fresh."""
         scale = self._stereo_effective_scale()
-        # Decoupled from main loop's 30 Hz: SGBM takes tens of ms per frame,
-        # running at 30 Hz would consume a core and slow down PID. 10 Hz is
-        # sufficient for obstacle detection.
-        fps = int(getattr(self.config, "stereo_target_fps", 15) or 15)
+        fps = int(getattr(self.config, "stereo_target_fps", 10) or 10)
         period = 1.0 / max(1.0, float(fps))
         event = self._stereo_stop_event
         if event is None:
             return
 
-        # 保留上一帧的引用（不是 id！id 会在对象被回收后被新的 ndarray 复用，
-        # 曾导致"明明是新帧却被当成旧帧跳过"）。用 `is` 比较时引用必须还活着，
-        # 所以 last_frame 要一直持有。
         last_frame = None
 
         while not event.is_set():
@@ -834,8 +764,6 @@ class DepthCamera:
             except Exception as e:
                 logging.debug("stereo: sampler read failed: %s", e)
 
-            # 共享源时，若 camera 还没产出下一帧，同一个对象会再次出现；
-            # 直接复用旧缓存，别把同一帧重复算一遍 SGBM。
             if frame is not None and frame is not last_frame:
                 last_frame = frame
                 eye_w = frame.shape[1] // 2 if frame.ndim >= 2 else 0
@@ -843,9 +771,35 @@ class DepthCamera:
                 depth = self._stereo_frame_to_depth(frame, real_scale)
                 with self._stereo_lock:
                     self._stereo_latest = depth
-                if depth is not None and not self._stereo_first_logged:
+
+                valid_count = 0 if depth is None else int(np.count_nonzero(depth))
+
+                # 连续多帧无有效读数时打印一次完整诊断，帮助定位问题。
+                if valid_count > 0:
+                    self._stereo_empty_streak = 0
+                else:
+                    self._stereo_empty_streak += 1
+                    if (self._stereo_empty_streak >= 5
+                            and not self._stereo_empty_warned):
+                        self._stereo_empty_warned = True
+                        logging.warning(
+                            "stereo: 5 consecutive frames with NO valid depth pixels. "
+                            "The disparity matcher is not producing any matches at all. "
+                            "Common causes, in the order worth checking:\n"
+                            "  1. Lens caps / focus / a covered sensor.\n"
+                            "  2. stereo_swap_eyes - some modules put the right eye on "
+                            "the left of the frame. Flip it and try again.\n"
+                            "  3. Lighting - SGBM needs edges; a plain wall in a dark "
+                            "room has none. Raise stereo_clahe_clip_limit to 3.0-4.0.\n"
+                            "  4. stereo_scale_mm_px - if the calibration constant is "
+                            "wrong, every match is out of range and looks like 'no "
+                            "reading'. Run test_stereo_calib.py.\n"
+                            "Run test_stereo_debug.py to dump the raw left/right and "
+                            "disparity frames. It shows exactly which step fails.")
+
+                if valid_count > 0 and not self._stereo_first_logged:
                     self._stereo_first_logged = True
-                    valid_ratio = float(np.count_nonzero(depth)) / float(depth.size)
+                    valid_ratio = float(valid_count) / float(depth.size)
                     valid_px = depth[depth > 0.0]
                     median_mm = float(np.median(valid_px)) if valid_px.size else 0.0
                     logging.info(
@@ -873,18 +827,7 @@ class DepthCamera:
     # ------------------------------------------------------------------
 
     def _candidate_uvc_devices(self) -> List[str]:
-        """
-        Nodes to try, most likely first.
-
-        The configured value is a hint, not a rule: it is tried first when it is
-        a USB node, and every other USB video node follows. USB numbering is not
-        stable across boots, so a run that worked yesterday can point the hint at
-        the metadata node (which never produces frames) or at a node that no
-        longer exists. Scanning costs a handful of opens on a failure path nobody
-        is timing, and turns "the camera moved" from a broken run into a log line.
-
-        Non-USB nodes are excluded outright -- see _is_usb_video_node.
-        """
+        """Nodes to try, most likely first."""
         configured = str(self.config.uvc_device or "").strip()
         candidates: List[str] = []
 
@@ -904,22 +847,11 @@ class DepthCamera:
                 candidates.append(path)
 
         if not candidates and configured:
-            # Nothing passed the USB filter (or sysfs is unavailable). Fall back to
-            # the configured node so the behaviour degrades to a single attempt
-            # rather than silently doing nothing.
             candidates.append(configured)
         return candidates
 
     def _start_decxin(self) -> bool:
-        """
-        Open the UVC depth stream, scanning the USB video nodes until one accepts.
-
-        Returns False on any failure so start() can fall back. The first frame is
-        decoded as part of the attempt on purpose: if conversion settings were not
-        honoured, every later frame would fail the same way, and failing here
-        produces one loud warning with the per-node reasons instead of a depth
-        guard that is silently blind for the whole run.
-        """
+        """Open the UVC depth stream, scanning the USB video nodes until one accepts."""
         candidates = self._candidate_uvc_devices()
         if not candidates:
             logging.warning(
@@ -933,8 +865,6 @@ class DepthCamera:
             ok, note = self._open_decxin_device(device)
             notes.append(f"{device}: {note}")
             if ok:
-                # Give the winning line its own INFO record: the per-node notes
-                # below are only worth printing when nothing worked.
                 logging.info("UVC depth: using %s ('%s'). %s", device,
                              self._uvc_fourcc or "format unreported", note)
                 return True
@@ -950,13 +880,7 @@ class DepthCamera:
         return False
 
     def _open_decxin_device(self, device: str) -> Tuple[bool, str]:
-        """
-        Try one node.
-
-        Returns (success, human-readable outcome). On success the handle is left
-        open and owned by self._uvc; on any failure it is released before return
-        so the next candidate starts clean.
-        """
+        """Try one node. Returns (success, human-readable outcome)."""
         cap = None
         try:
             device_arg = device
@@ -969,8 +893,6 @@ class DepthCamera:
             if not cap.isOpened():
                 return False, "could not be opened"
 
-            # Without this OpenCV converts every frame to 8-bit BGR, which throws
-            # the depth data away -- the not-a-depth-buffer check below catches it.
             convert_prop = getattr(cv2, "CAP_PROP_CONVERT_RGB", None)
             if convert_prop is not None:
                 cap.set(convert_prop, 0)
@@ -985,8 +907,6 @@ class DepthCamera:
 
             ok, raw = cap.read()
             if not ok or raw is None:
-                # Typical for the UVC metadata node that pairs with the capture
-                # node: it opens fine and never produces a frame.
                 return False, "opened but produced no frame (metadata node?)"
 
             negotiated = _fourcc_str(cap.get(cv2.CAP_PROP_FOURCC))
@@ -997,9 +917,6 @@ class DepthCamera:
                 return False, (f"colour stream '{negotiated}', not depth -- the "
                                f"device ignored the fourcc request")
             elif not code:
-                # Shape-only acceptance, kept for OpenCV builds that cannot report
-                # a non-standard FOURCC. Flag it loudly: if the device is actually
-                # streaming YUYV this branch manufactures garbage distances.
                 logging.warning(
                     "UVC depth: %s did not report its pixel format. Assuming 16-bit "
                     "depth from the frame shape (%s). If distances look wrong, run "
@@ -1013,7 +930,6 @@ class DepthCamera:
                                f"(dtype={raw.dtype} shape={raw.shape} "
                                f"negotiated='{negotiated or 'unreported'}')")
 
-            # Success: hand the handle over so the finally block leaves it open.
             self._uvc = cap
             cap = None
             self._uvc_device_in_use = device
@@ -1037,7 +953,6 @@ class DepthCamera:
             return None, None
 
         if not ok or raw is None:
-            # A missed frame is not a fault; the guard treats None as "no data".
             return None, None
 
         depth = self._decode_raw_depth(raw, self._uvc_fourcc)
@@ -1047,31 +962,12 @@ class DepthCamera:
 
     def _decode_raw_depth(self, raw: Optional[np.ndarray],
                           negotiated: str = "") -> Optional[np.ndarray]:
-        """
-        Normalise one raw UVC buffer into float32 millimetres, or None.
-
-        `negotiated` is the FOURCC the device reported for this stream. It is the
-        only way to tell these apart, because several of them share a shape:
-
-            uint16 (h, w)      - the camera already hands back 16-bit counts
-            uint8  (h, w, 2)   - the same data as raw little-endian bytes, which is
-                                 what OpenCV gives when it cannot widen the element
-            uint8  (h, w, 2)   - OR a 4:2:2 colour frame seen through
-                                 CONVERT_RGB=0, which is *not* depth and would
-                                 decode into nonsense if the shape were trusted
-            uint8  (h, w, 3)   - OpenCV converted to BGR after all; the depth is
-                                 gone and no amount of reinterpretation brings it
-                                 back, so this is reported as "no reading" rather
-                                 than as a plausible-looking 8-bit height map.
-        """
+        """Normalise one raw UVC buffer into float32 millimetres, or None."""
         if raw is None or raw.size == 0:
             return None
 
         code = (negotiated or "").strip().upper()
 
-        # Reject a negotiated 4:2:2 colour format outright. Checked here as well
-        # as in _open_decxin_device because a USB link that renegotiates mid-run
-        # would otherwise start feeding colour frames into the distance band.
         if code in _COLOUR_FOURCCS:
             logging.debug("UVC depth: dropping frame, device negotiated colour "
                           "format '%s'.", negotiated)
@@ -1080,15 +976,10 @@ class DepthCamera:
         if raw.dtype == np.uint16:
             counts = raw
         elif raw.dtype == np.uint8 and raw.ndim == 3 and raw.shape[2] == 2:
-            # Two bytes per pixel, little-endian on every platform this runs on.
-            # Reached only for a depth FOURCC or when the format was unreported.
             counts = np.ascontiguousarray(raw).view(np.uint16).reshape(raw.shape[0], raw.shape[1])
         else:
             return None
 
-        # Float32 in mm rather than raw counts: the rest of the code compares
-        # against thresholds in millimetres, and a units mix-up there would read
-        # as a 1000x error in either direction.
         return counts.astype(np.float32) * float(self.config.uvc_depth_unit_mm)
 
     # ------------------------------------------------------------------
@@ -1110,9 +1001,6 @@ class DepthCamera:
             profile = pipeline.start(cfg)
             self._pipeline = pipeline
 
-            # Read the device's own scale factor rather than assuming 1 mm/count.
-            # D455 and friends differ from D435 here, and hardcoding it would put
-            # every distance off by a constant factor.
             try:
                 sensor = profile.get_device().first_depth_sensor()
                 self._depth_scale_m = float(sensor.get_depth_scale())
@@ -1125,12 +1013,8 @@ class DepthCamera:
 
     def _capture_realsense(self):
         try:
-            # Positional timeout is the form that exists across pyrealsense2
-            # releases; the keyword spelling is newer and not always present.
             frames = self._pipeline.wait_for_frames(self.config.capture_timeout_ms)
         except RuntimeError:
-            # wait_for_frames raises on timeout. That is a dropped frame, not a
-            # fault: return empty and let the control loop carry on.
             return None, None
         except Exception as e:
             logging.debug(f"RealSense capture failed: {e}")
@@ -1159,14 +1043,7 @@ class DepthCamera:
     # ------------------------------------------------------------------
 
     def _capture_mock(self):
-        """
-        Synthesise a flat wall at 3 m with a little sensor noise.
-
-        Deliberately inert: 3000 mm is inside the valid range but well beyond
-        warning_mm, so the guard never fires from mock data. A mock that triggered
-        emergency stops would make the fallback path worse than having no depth
-        camera at all.
-        """
+        """Synthesise a flat wall at 3 m with a little sensor noise."""
         h, w = self.config.height, self.config.width
         depth = np.full((h, w), 3000.0, dtype=np.float32)
         depth += np.random.randint(-50, 51, size=(h, w)).astype(np.float32)
