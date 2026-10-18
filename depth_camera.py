@@ -518,7 +518,8 @@ class DepthCamera:
             return False
 
         # First frame may not be ready immediately after Camera.start(), wait briefly.
-        deadline = time.monotonic() + 2.0
+        # Picamera2 can take several seconds to produce the first frame.
+        deadline = time.monotonic() + 5.0
         frame = None
         while time.monotonic() < deadline:
             try:
@@ -532,7 +533,7 @@ class DepthCamera:
 
         if frame is None:
             logging.warning(
-                "Depth camera: did not receive frame from camera.py within 2 seconds "
+                "Depth camera: did not receive frame from camera.py within 5 seconds "
                 "(latest_stereo_frame returned None). V4L2 capture may not have produced "
                 "the first frame yet, or it's a static frame. Switching to direct device open.")
             return False
