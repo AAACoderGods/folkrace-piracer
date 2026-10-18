@@ -13,8 +13,8 @@ class CameraConfig:
     # 这个值要跟 stereo_capture_width / 2 实际能给出的单眼尺寸对得上，否则
     # resize 会把有效信息压掉：1280 宽的单眼如果缩成 640 输出，画面自然会糊。
     # 双目相机的上限是 stereo_capture_width / 2；再大的 width 只会是拉伸。
-    width: int = 640
-    height: int = 360
+    width: int = 432
+    height: int = 240
     framerate: int = 30
     format: str = "RGB888"  # or 'BGR888'
 
@@ -52,14 +52,13 @@ class CameraConfig:
     # 只有 split_stereo_frame="always" 时生效——此时 Camera 会以这个尺寸向设备
     # 请求采集，并把未拆分帧共享给 depth_camera.py。
     #
-    # DECXIN 支持的并排模式里，1280x480 是单眼 640x480，对 Pi 来说性能友好。
-    # 2560x960（单眼 1280x480）更清晰但 CPU 负载很高。
+    # 864x320 是 1280x480 的 2/3，性能友好。
     #
     # 改了这两项后，stereo_scale_mm_px 必须重新校准：视差里 focal 是按像素算的，
-    # 分辨率翻倍后同一块靶子在同一距离上给出的视差也翻倍，旧的 scale 会把距离
-    # 算成原来的一半。
-    stereo_capture_width: int = 1280
-    stereo_capture_height: int = 480
+    # 分辨率改变后同一块靶子在同一距离上给出的视差也会改变，旧的 scale 会把距离
+    # 算错。
+    stereo_capture_width: int = 864
+    stereo_capture_height: int = 320
 
     # 双目模式下走 V4L2 直连，绕过 Picamera2。
     #
@@ -154,9 +153,9 @@ class DepthCameraConfig:
 
     # 单眼分辨率（深度计算用）。必须与 camera.stereo_capture_width / 2 相等，
     # 否则 _try_start_stereo_from_source 会因为尺寸不匹配而拒绝共享帧。
-    # 640x240 的单眼对应 1280x480 的总尺寸；1280x480 单眼对应 2560x960 总尺寸。
-    stereo_width: int = 640
-    stereo_height: int = 240
+    # 432x320 的单眼对应 864x320 的总尺寸。
+    stereo_width: int = 432
+    stereo_height: int = 320
 
     # 视差计算的频率上限。StereoBM 在 1280x480x256 上一次要上百毫秒，
     # 跑满主循环的 30 Hz 会吃掉一个核并拖慢 PID。10 Hz 对前方障碍检测足够。
@@ -178,9 +177,9 @@ class DepthCameraConfig:
     #
     # A scale of 0 means "not calibrated": the stereo backend refuses to start
     # and falls back to mock. That is deliberate, not a bug.
-    # Note: This value is for 640x240 single eye resolution. If you change
+    # Note: This value is for 432x320 single eye resolution. If you change
     # stereo_width/stereo_height, you must re-calibrate with test_stereo_calib.py
-    stereo_scale_mm_px: float = 13500.0
+    stereo_scale_mm_px: float = 26375.0
 
     # Physical alternative to the measured scale: if the module's datasheet
     # gives the lens focal length (pixels, at the eye width set above) and the
