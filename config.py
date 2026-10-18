@@ -180,7 +180,7 @@ class DepthCameraConfig:
     #
     # A scale of 0 means "not calibrated": the stereo backend refuses to start
     # and falls back to mock. That is deliberate, not a bug.
-    stereo_scale_mm_px: float = 0.0
+    stereo_scale_mm_px: float = 27000.0
 
     # Physical alternative to the measured scale: if the module's datasheet
     # gives the lens focal length (pixels, at the eye width set above) and the
