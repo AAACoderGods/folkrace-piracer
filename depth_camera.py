@@ -478,20 +478,21 @@ class DepthCamera:
                 "stereo_num_disparities (currently %d) or check the scale.",
                 closest_mm, self.config.emergency_stop_mm, num_disp)
 
-        # 1) 共享 camera.py 的原始双目帧。这是主路径：同一块 UVC 双目设备只被
-        #    打开了一次，视差算的就是 vision 正在用的那帧。
+        # 1) Share camera.py's raw stereo frame. This is the main path: the same
+        #    UVC stereo device is opened only once, disparity is computed on the
+        #    frame vision is using.
         if self._try_start_stereo_from_source(scale):
             return True
 
-        # 2) 回退：自己打开设备。仅当 camera.py 走的是另一块相机（CSI）时才有
-        #    意义，或者 frame_source 还没产生帧。
+        # 2) Fallback: open device ourselves. Only meaningful when camera.py uses
+        #    a different camera (CSI), or when frame_source hasn't produced frames yet.
         candidates = self._candidate_uvc_devices()
         for device in candidates:
             if self._open_stereo_device(device):
                 self._stereo_external = False
                 self._uvc_device_in_use = device
                 self._launch_stereo_sampler()
-                logging.info("UVC stereo: 自己打开了 %s。", device)
+                logging.info("UVC stereo: opened %s directly.", device)
                 return True
 
         logging.warning(
@@ -512,18 +513,18 @@ class DepthCamera:
         source = self._frame_source
         if source is None or not hasattr(source, "latest_stereo_frame"):
             logging.info(
-                "Depth camera: 没有共享帧源（frame_source 缺失或未实现 "
-                "latest_stereo_frame），将尝试自己打开 UVC 设备。")
+                "Depth camera: no shared frame source (frame_source missing or does not "
+                "implement latest_stereo_frame), will try to open UVC device directly.")
             return False
 
-        # Camera.start() 刚结束时第一帧可能还没到，等一小会儿。
+        # First frame may not be ready immediately after Camera.start(), wait briefly.
         deadline = time.monotonic() + 2.0
         frame = None
         while time.monotonic() < deadline:
             try:
                 frame = source.latest_stereo_frame()
             except Exception as e:
-                logging.debug("stereo: 外部帧源读取失败: %s", e)
+                logging.debug("stereo: external frame source read failed: %s", e)
                 return False
             if frame is not None:
                 break
@@ -531,35 +532,36 @@ class DepthCamera:
 
         if frame is None:
             logging.warning(
-                "Depth camera: 2 秒内没从 camera.py 拿到帧（latest_stereo_frame "
-                "返回 None）。多半是 V4L2 采集还没出第一帧，或者是静帧。"
-                "转为自开设备。")
+                "Depth camera: did not receive frame from camera.py within 2 seconds "
+                "(latest_stereo_frame returned None). V4L2 capture may not have produced "
+                "the first frame yet, or it's a static frame. Switching to direct device open.")
             return False
 
         h, w = frame.shape[:2]
-        # 尺寸保护：如果 camera.py 给的是 640 宽（CSI 单眼、或没有按原生双目
-        # 尺寸采集），强行算视差只会得到垃圾数据。宁可不启动，也不要给错距离。
+        # Size protection: if camera.py provides a 640-wide frame (CSI single eye, or
+        # not captured at native stereo size), forcing disparity computation will only
+        # produce garbage data. Better to not start than to give wrong distances.
         min_w = int(self.config.stereo_width * 0.9)
         if w < min_w:
             logging.warning(
-                "Depth camera: 从 camera.py 拿到的帧是 %dx%d，不是双目尺寸"
-                "（期望至少 %d 宽）。通常意味着 Camera 未按双目原始尺寸采集。"
-                "检查 main.py 是否在 depth backend='stereo' 时强制了 "
-                "split_stereo_frame='always'，且 config.camera.stereo_capture_width "
-                "与实际双目总宽一致。",
+                "Depth camera: frame from camera.py is %dx%d, not stereo size "
+                "(expected at least %d wide). Usually means Camera did not capture at "
+                "native stereo size. Check if main.py forces split_stereo_frame='always' "
+                "when depth backend='stereo', and that config.camera.stereo_capture_width "
+                "matches the actual stereo total width.",
                 w, h, min_w)
             return False
 
         depth = self._stereo_frame_to_depth(frame, scale)
         if depth is None:
-            logging.warning("Depth camera: 外部帧源给出的帧无法算出视差，转为自开设备。")
+            logging.warning("Depth camera: frame from external source could not compute disparity, switching to direct device open.")
             return False
 
         self._stereo_external = True
-        self._uvc_device_in_use = f"camera.py 共享帧 ({w}x{h})"
+        self._uvc_device_in_use = f"camera.py shared frame ({w}x{h})"
         self._launch_stereo_sampler()
         logging.info(
-            "UVC stereo: 复用 camera.py 的双目帧（%dx%d），不再重复打开同一块设备。",
+            "UVC stereo: reusing camera.py's stereo frame (%dx%d), not opening the same device again.",
             w, h)
         return True
 
@@ -644,7 +646,7 @@ class DepthCamera:
         if frame is None or not isinstance(frame, np.ndarray) or frame.ndim != 3:
             return None
         h, w = frame.shape[:2]
-        # 奇数宽度来自某些模式下的 padding；裁掉一列即可，不必整帧丢弃。
+        # Odd width comes from padding in some modes; just drop one column, no need to discard the whole frame.
         if w % 2 != 0:
             w -= 1
             frame = frame[:, :w]
@@ -693,15 +695,15 @@ class DepthCamera:
     def _stereo_sampler_loop(self):
         """Background sampler: keep the cached depth frame fresh."""
         scale = self._stereo_effective_scale()
-        # 与主循环的 30 Hz 解耦：StereoBM 在 1280x480x256 上一次要上百毫秒，
-        # 跑满 30 Hz 会吃掉一个核并拖慢 PID。10 Hz 对障碍检测足够。
+        # Decoupled from main loop's 30 Hz: StereoBM takes hundreds of ms on 1280x480x256,
+        # running at 30 Hz would consume a core and slow down PID. 10 Hz is sufficient for obstacle detection.
         fps = int(getattr(self.config, "stereo_target_fps", 15) or 15)
         period = 1.0 / max(1.0, float(fps))
         event = self._stereo_stop_event
         if event is None:
             return
 
-        # 共享帧源时同一个数组会被反复喂进来；id 去重避免把同一帧算好几遍。
+        # When sharing frame source, the same array is fed repeatedly; id dedup avoids computing the same frame multiple times.
         last_frame_id = None
 
         while not event.is_set():
@@ -737,9 +739,9 @@ class DepthCamera:
                     self._stereo_first_logged = True
                     valid_ratio = float(np.count_nonzero(depth)) / float(depth.size)
                     logging.info(
-                        "stereo: 首帧深度图就绪，有效像素 %.1f%%。若这数字很低，"
-                        "多半是 StereoBM 找不到匹配（场景太光滑 / 目标太远 / "
-                        "光照太暗），可先调大 stereo_block_size 或换一个纹理更丰富的场景。",
+                        "stereo: first depth frame ready, valid pixels %.1f%%. If this number is low, "
+                        "StereoBM likely cannot find matches (scene too smooth / target too far / "
+                        "lighting too dark). Try increasing stereo_block_size or use a more textured scene.",
                         valid_ratio * 100.0)
             else:
                 with self._stereo_lock:
