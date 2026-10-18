@@ -103,8 +103,20 @@ class Camera:
                     )
                 self.picam2.configure(cam_config)
                 self.picam2.start()
-                # Warm up
+                # Warm up and capture first frame for depth camera
                 time.sleep(0.5)
+                try:
+                    warmup_frame = self.picam2.capture_array()
+                    warmup_frame = numpy.rot90(warmup_frame, 2, (0, 1))
+                    if warmup_frame is not None and len(warmup_frame.shape) == 3:
+                        if warmup_frame.shape[2] == 4 and cv2 is not None:
+                            warmup_frame = cv2.cvtColor(warmup_frame, cv2.COLOR_RGBA2BGR)
+                        elif warmup_frame.shape[2] == 3 and cv2 is not None and self.format.startswith("RGB"):
+                            warmup_frame = cv2.cvtColor(warmup_frame, cv2.COLOR_RGB2BGR)
+                    self._remember_raw(warmup_frame)
+                    logging.debug("Camera: warm-up frame captured for depth camera.")
+                except Exception as e:
+                    logging.debug(f"Camera: warm-up frame capture failed (non-critical): {e}")
                 self.is_running = True
                 logging.info(f"✅ Picamera2 started successfully "
                              f"({self._capture_size[0]}x{self._capture_size[1]} @ {self.framerate}fps)")
