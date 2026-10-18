@@ -410,6 +410,19 @@ class RemoteConfig:
 
 
 @dataclass
+class OLEDConfig:
+    """
+    OLED display settings for PiRacer Pro onboard screen.
+    Shows CPU, memory usage, and car speed.
+    """
+    enable_oled: bool = True
+    width: int = 128
+    height: int = 64
+    i2c_address: int = 0x3C  # Default I2C address for SSD1306
+    update_interval: float = 0.5  # Update display every 0.5 seconds
+
+
+@dataclass
 class AppConfig:
     camera: CameraConfig = field(default_factory=CameraConfig)
     depth: DepthCameraConfig = field(default_factory=DepthCameraConfig)
@@ -418,6 +431,7 @@ class AppConfig:
     sensor: SensorConfig = field(default_factory=SensorConfig)
     stream: StreamConfig = field(default_factory=StreamConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
+    oled: OLEDConfig = field(default_factory=OLEDConfig)
 
     # Log level and loop target rate
     target_loop_hz: int = 30

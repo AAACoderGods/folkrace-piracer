@@ -18,6 +18,7 @@ from controller import VehicleController
 from sensors import SensorManager
 from streamer import WebStreamer
 from webcontrol import RemoteState, SOURCE_AUTO, SOURCE_MANUAL, SOURCE_PAUSED
+from oled import OLEDDisplay
 
 try:
     import cv2
@@ -235,6 +236,7 @@ def main():
     logging.info(f" Depth Camera: {config.depth.enable_depth} "
                  f"(backend: {config.depth.backend}, device: {config.depth.uvc_device})")
     logging.info(f" Web Live Tuning: {config.remote.allow_tuning} | Web Manual Control: {config.remote.allow_manual}")
+    logging.info(f" OLED Display: {config.oled.enable_oled}")
     logging.info("=" * 50)
 
     if config.remote.allow_manual:
@@ -278,6 +280,7 @@ def main():
         fps=config.stream.fps,
         remote=remote,
     ) if config.stream.enable_stream else None
+    oled = OLEDDisplay(config.oled)
 
     try:
         camera.start()
@@ -287,6 +290,7 @@ def main():
         sensors.start()
         if streamer is not None:
             streamer.start()
+        oled.start()
         logging.info("All subsystems initialized. Starting main control loop...")
 
         loop_period = 1.0 / config.target_loop_hz
@@ -338,6 +342,9 @@ def main():
                     vehicle.stop()
                 else:
                     vehicle.set_drive(steering, throttle)
+
+                # 6b. Update OLED display with current stats
+                oled.update(throttle)
 
                 # 7. Publish telemetry to the web console.
                 #    The coarse depth grid rides along so the page can answer "how
@@ -417,6 +424,7 @@ def main():
         sensors.cleanup()
         if streamer is not None:
             streamer.stop()
+        oled.stop()
         if cv2 is not None:
             cv2.destroyAllWindows()
         logging.info("System terminated safely.")
