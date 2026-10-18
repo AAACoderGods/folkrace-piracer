@@ -26,6 +26,8 @@ except ImportError:
 try:
     import board
     import adafruit_ssd1306
+    from adafruit_ssd1306 import SSD1306_I2C
+    from PIL import Image, ImageDraw, ImageFont
     ADAFRUIT_AVAILABLE = True
 except ImportError:
     ADAFRUIT_AVAILABLE = False
@@ -38,6 +40,9 @@ class OLEDDisplay:
         self.config = config
         self.device = None
         self.disp = None
+        self.image = None
+        self.draw = None
+        self.font = None
         self.last_update_time = 0
         self.enabled = config.enable_oled
 
@@ -67,6 +72,14 @@ class OLEDDisplay:
                     i2c,
                     addr=self.config.i2c_address
                 )
+                # Initialize PIL image for drawing
+                self.image = Image.new('1', (self.config.width, self.config.height))
+                self.draw = ImageDraw.Draw(self.image)
+                # Try to load a default font, fall back to default if not available
+                try:
+                    self.font = ImageFont.load_default()
+                except:
+                    self.font = None
                 self.disp.fill(0)
                 self.disp.show()
                 logging.info(f"OLED: Initialized via adafruit_ssd1306 (I2C address: 0x{self.config.i2c_address:02X})")
@@ -135,9 +148,20 @@ class OLEDDisplay:
         # Display using Adafruit SSD1306
         elif self.disp is not None:
             try:
-                self.disp.fill(0)
-                self.disp.text(line1, 0, 0, 1)
-                self.disp.text(line2, 0, 16, 1)
+                # Clear the image
+                self.draw.rectangle((0, 0, self.config.width, self.config.height), outline=0, fill=0)
+                
+                # Draw text using PIL
+                if self.font is not None:
+                    self.draw.text((0, 0), line1, font=self.font, fill=255)
+                    self.draw.text((0, 16), line2, font=self.font, fill=255)
+                else:
+                    # Fallback if font loading failed
+                    self.draw.text((0, 0), line1, fill=255)
+                    self.draw.text((0, 16), line2, fill=255)
+                
+                # Display the image
+                self.disp.image(self.image)
                 self.disp.show()
             except Exception as e:
                 logging.error(f"Error updating OLED via adafruit_ssd1306: {e}")

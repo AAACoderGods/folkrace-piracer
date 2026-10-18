@@ -4,3 +4,4 @@ opencv-python
 picamera2
 adafruit-circuitpython-servokit
 piracer-py
+pillow
