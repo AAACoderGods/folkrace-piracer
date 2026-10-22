@@ -184,4 +184,137 @@ def process_stereo_geometry(gray_left, gray_right, num_disparities, block_size, 
     y0, y1 = int(h * 0.35), int(h * 0.65)
     
     dead_zone_x = DEFAULT_MIN_DISPARITY + num_disparities
-    x_start = max(int(w * 0.3
+    x_start = max(int(w * 0.35), dead_zone_x)
+    x_end = max(int(w * 0.65), x_start + 20)
+
+    if x_start >= w - 10:
+        return None
+
+    patch = raw[y0:y1, x_start:x_end]
+    
+    # 8. 过滤有效点
+    mask = patch > (DEFAULT_MIN_DISPARITY + 0.1)
+    if not np.any(mask):
+        return None
+
+    valid_pixels = patch[mask]
+    return float(np.median(valid_pixels)), float(np.std(valid_pixels))
+
+
+def get_single_frame_disparity(frame, args):
+    h, w = frame.shape[:2]
+    if w % 2 != 0:
+        w -= 1
+        frame = frame[:, :w]
+    half = w // 2
+
+    if args.swap_eyes:
+        left, right = frame[:, half:], frame[:, :half]
+    else:
+        left, right = frame[:, :half], frame[:, half:]
+
+    gray_left = cv2.cvtColor(left, cv2.COLOR_BGR2GRAY)
+    gray_right = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
+    
+    return process_stereo_geometry(gray_left, gray_right, DEFAULT_NUM_DISPARITIES, 
+                                   DEFAULT_BLOCK_SIZE, args.clahe_clip)
+
+
+# ==================== 3. 主逻辑控制 ====================
+def main():
+    args = parse_args()
+
+    device = pick_device(args.device, args.width, args.height)
+    if device is None:
+        print("❌ 未找到可正常输出的双目视频节点。请检查连线。")
+        sys.exit(2)
+        
+    print(f"打开视频节点: {device}")
+    cap = cv2.VideoCapture(device)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+
+    print("-" * 50)
+    print(f"当前运行参数: numDisp={DEFAULT_NUM_DISPARITIES}, blockSize={DEFAULT_BLOCK_SIZE}, minDisp={DEFAULT_MIN_DISPARITY}")
+    print(f"滤波配置: uniqRatio={DEFAULT_UNIQUENESS_RATIO}, medianBlur={DEFAULT_MEDIAN_BLUR}, clahe={args.clahe_clip}")
+    print("-" * 50)
+
+    try:
+        # 1. 自动采样标定模式
+        if args.distance is not None:
+            target_dist = args.distance
+            print(f"🎯 进入【标定计算模式】: 目标距离设为 {target_dist} mm")
+            print(f"正在采集 {args.samples} 帧有效数据，请保持目标静止...")
+            
+            valid_disparities = []
+            consecutive_failures = 0
+            
+            while len(valid_disparities) < args.samples:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                    
+                res = get_single_frame_disparity(frame, args)
+                if res is not None:
+                    median_disp, std_disp = res
+                    if std_disp < 1.5:
+                        valid_disparities.append(median_disp)
+                        print(f"  [采样进度 {len(valid_disparities):2d}/{args.samples}] 视差: {median_disp:6.2f} px | Std: {std_disp:4.2f}")
+                        consecutive_failures = 0
+                    else:
+                        print(f"  ⚠️ 视差离散度过高 (Std: {std_disp:4.2f})，抛弃此帧。请平正对齐目标！")
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures > 50:
+                        print("\n❌ 错误: 持续无法找到有效视差匹配。请检查目标纹理与左右眼设置。")
+                        sys.exit(3)
+                time.sleep(0.03)
+
+            final_disp = float(np.median(valid_disparities))
+            suggested_scale = target_dist * final_disp
+            print("=" * 60)
+            print("🎉 标定采集完成！")
+            print(f"▶ 采样平均视差: {final_disp:.3f} px")
+            print(f"▶ 推荐填入 config.py 的配置:")
+            print(f"  stereo_scale_mm_px = {suggested_scale:.2f}")
+            print("=" * 60)
+
+        # 2. 纯命令行实时观察模式
+        else:
+            print("👀 进入【命令行实时观察模式】（按 Ctrl+C 退出）\n")
+            while True:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+
+                res = get_single_frame_disparity(frame, args)
+                if res is not None:
+                    median_disp, std_disp = res
+                    # ASCII 可视化视差条（最大长度 40 字符）
+                    bar_len = int(min(median_disp, 200) / 5)
+                    bar_str = "█" * bar_len
+                    
+                    # 稳定性指示灯：Std < 1.5 显示 OK，否则显示 ⚠️
+                    status = "🟢 OK" if std_disp < 1.5 else "🔴 波动"
+
+                    # 行内实时刷新
+                    sys.stdout.write(
+                        f"\r[实时视差] {median_disp:6.2f} px | Std: {std_disp:4.2f} | 状态: {status} | [{bar_str:<40s}]"
+                    )
+                    sys.stdout.flush()
+                else:
+                    sys.stdout.write("\r[实时视差] 正在寻找有效视差匹配...                                 ")
+                    sys.stdout.flush()
+
+                time.sleep(0.03)
+
+    except KeyboardInterrupt:
+        print("\n\n用户手动退出程序。")
+    finally:
+        cap.release()
+
+
+if __name__ == "__main__":
+    main()
