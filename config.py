@@ -32,18 +32,22 @@ class CameraConfig:
     # the seam between the eyes.
     #
     # It reaches the track camera when the CSI module is missing and camera.py
-    # falls back to cv2.VideoCapture(0), which on this Pi now enumerates the
-    # DECXIN as /dev/video0. The same rule applies if a Picamera2 build ever
-    # captures the same UVC device.
+    # falls back to cv2.VideoCapture, which on this Pi enumerates the DECXIN as
+    # /dev/video1. The same rule applies if a Picamera2 build ever captures the
+    # same UVC device.
     #
-    #   "auto"    - split only when the frame's width/height >= 2.2, which is
-    #               true of every DECXIN native mode and of nothing a single-lens
-    #               webcam produces.
-    #   "always"  - split every frame in half, and ask the device for the full
-    #               stereo_capture_width x stereo_capture_height (below) instead
-    #               of the target width x height. main.py forces this whenever the
-    #               depth backend is "stereo", so the depth camera gets the
-    #               native, un-squashed pair through Camera.latest_stereo_frame().
+    #   "auto"    - split when the frame's width/height >= 2.2, which is true of
+    #               every DECXIN native mode and of nothing a single-lens webcam
+    #               produces. If width and height describe exactly one eye of the
+    #               configured stereo pair (2 * width == stereo_capture_width and
+    #               height == stereo_capture_height), the device is asked for the
+    #               full pair; that keeps the auto path from silently shrinking
+    #               the eyes to a non-native resolution.
+    #   "always"  - split every frame in half, and always ask the device for the
+    #               full stereo_capture_width x stereo_capture_height (below).
+    #               main.py forces this whenever the depth backend is "stereo",
+    #               so the depth camera gets the native, un-squashed pair through
+    #               Camera.latest_stereo_frame().
     #   "never"   - leave the frame alone.
     split_stereo_frame: str = "auto"
     # Which half survives: "left" (the reference eye used by depth_camera.py) or
@@ -53,8 +57,6 @@ class CameraConfig:
     stereo_eye: str = "left"
 
     # 拆分前的原始尺寸：左右两眼并排的总宽 / 单眼的高。
-    # 只有 split_stereo_frame="always" 时生效——此时 Camera 会以这个尺寸向设备
-    # 请求采集，并把未拆分帧共享给 depth_camera.py。
     #
     # 1280x480 是 DECXIN-SM-2930V1 的一个原生模式（30fps@MJPG），单眼 640x480。
     # 之前的 864x320 不在模组的支持列表里（native 只有 1280x480 / 1600x600 /
@@ -73,10 +75,23 @@ class CameraConfig:
     #
     # Picamera2 会对 UVC 的 MJPG 流再做一层 ISP 处理（tone mapping / 缩放），
     # 对一块只有 MJPG 的双目相机来说这是画质的主要损失来源；cv2.VideoCapture
-    # 走 V4L2 直读解码后的帧，明显更锐。只有在 split_stereo_frame="always"
-    # （即 main.py 已经确认这是一台双目相机）时才会启用，CSI 相机不受影响。
-    # 若直连失败，start() 会自动回退到 Picamera2。
+    # 走 V4L2 直读解码后的帧，明显更锐。只有在 split_stereo_frame 不是 "never"
+    # 时才会尝试，失败会自动回退到 Picamera2。
     prefer_v4l2: bool = True
+
+    # 强制使用的 V4L2 节点。
+    #
+    # 空串 = 自动扫描 USB 视频节点（跳过 CSI / codec）。在这台 Pi 上留空即可：
+    # 唯一能出帧的彩色节点是 /dev/video1，camera.py 会按 USB 总线自动挑中它，
+    # 并读一帧验证后才宣告成功。
+    #
+    # 什么时候要填：如果树莓派上同时挂了多块 USB 相机，或者自动扫描选错了。
+    # 可填 "/dev/video1" 或 "1"。
+    #
+    # 之前 camera.py 硬编码 cv2.VideoCapture(0)，而这里 /dev/video0 是 CSI
+    # （unicam）节点：能打开，但永远读不出帧。Camera.start() 因此报告成功，
+    # capture_frame() 每帧落到合成假图 —— 车实际在"看"一条画出来的路。
+    v4l2_device: str = ""
 
     # 强制使用的 V4L2 像素格式。
     #

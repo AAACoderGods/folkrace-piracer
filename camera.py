@@ -3,7 +3,10 @@ Camera abstraction module supporting Picamera2 for Raspberry Pi 4/5
 and fallback to OpenCV VideoCapture or synthetic frames for local testing.
 """
 
+import glob
 import logging
+import os
+import re
 import threading
 import time
 
@@ -27,6 +30,32 @@ except ImportError:
 # (1.78), so 2.2 separates them without touching any normal footage.
 _STEREO_ASPECT_THRESHOLD = 2.2
 
+# Where the kernel ties a /dev/videoN node to the bus it hangs off. Used to keep
+# CSI / codec nodes out of the V4L2 candidate list: on a Pi with no CSI module
+# /dev/video0 still exists, opens cleanly, and never produces a frame.
+_SYSFS_V4L = "/sys/class/video4linux"
+
+
+def _is_usb_video_node(device) -> bool:
+    """True when the node hangs off a USB bus, rather than CSI / codec / ISP."""
+    if not isinstance(device, str):
+        return True
+    if not device.startswith("/dev/"):
+        return True
+    if not os.path.isdir(_SYSFS_V4L):
+        return True
+    try:
+        real = os.path.realpath(os.path.join(_SYSFS_V4L, os.path.basename(device), "device"))
+    except OSError:
+        return True
+    return "/usb" in real
+
+
+def _device_sort_key(path: str):
+    """Natural order for /dev/video2 < /dev/video10."""
+    match = re.search(r"(\d+)$", path)
+    return (int(match.group(1)) if match else 1 << 30, path)
+
 
 def _fourcc_str(value) -> str:
     """把 CAP_PROP_FOURCC 的整数还原成四字符码，用于日志诊断。"""
@@ -48,6 +77,7 @@ class Camera:
                  stereo_capture_width: int = 1280,
                  stereo_capture_height: int = 480,
                  prefer_v4l2: bool = False,
+                 v4l2_device: str = "",
                  v4l2_fourcc: str = "MJPG",
                  v4l2_auto_exposure_mode: float = -1.0,
                  v4l2_exposure_absolute: float = -1.0,
@@ -61,7 +91,8 @@ class Camera:
         # "left" | "right" -- which half of a side-by-side pair to keep.
         self.stereo_eye = stereo_eye
         # 拆分前的原始尺寸（左右两眼并排的总宽 x 单眼高）。只有
-        # split_stereo_frame="always" 时生效，见 _compute_capture_size()。
+        # split_stereo_frame="always"（或在 "auto" 下 width/height 恰好是一只眼
+        # 的尺寸）时生效，见 _compute_capture_size()。
         self.stereo_capture_width = int(stereo_capture_width)
         self.stereo_capture_height = int(stereo_capture_height)
         # 双目模式下走 cv2.VideoCapture(V4L2) 直连而不是 Picamera2。
@@ -69,6 +100,14 @@ class Camera:
         # 只有 MJPG 的双目 UVC 相机来说这是画质的主要损失来源。只有在双目模式
         # 下才启用，CSI 相机不受影响。
         self.prefer_v4l2 = bool(prefer_v4l2)
+        # V4L2 节点。空串 = 自动扫描 USB 视频节点。
+        #
+        # 之前这里硬编码 cv2.VideoCapture(0)。在这台 Pi 上 /dev/video0 是
+        # CSI（unicam）节点：能打开，但永远读不出帧。Camera.start() 因此
+        # 报告成功，capture_frame() 每帧落到合成假图 —— 车实际在"看"一条
+        # 画出来的路。真正的双目相机是 /dev/video1。填 "/dev/video1" 或
+        # "1" 可强制指定；留空则按 USB 节点扫描，跳过 CSI / codec。
+        self.v4l2_device = (v4l2_device or "").strip()
         # V4L2 采集时强制使用的像素格式。
         #
         # 这是之前只有 25fps 的根因：不设置 FOURCC 时驱动会选 YUYV（未压缩），
@@ -106,14 +145,14 @@ class Camera:
         """Initialize and start the camera stream."""
         self._capture_size = self._compute_capture_size()
         logging.info("Camera: capture size %dx%d (split_stereo_frame=%s, "
-                     "prefer_v4l2=%s, target %dx%d)",
+                     "prefer_v4l2=%s, v4l2_device=%s, target %dx%d)",
                      self._capture_size[0], self._capture_size[1],
                      self.split_stereo_frame, self.prefer_v4l2,
-                     self.width, self.height)
+                     self.v4l2_device or "(auto-scan USB)", self.width, self.height)
 
-        # 双目 + 需要 V4L2 直连时，优先这里。失败再落回 Picamera2，
-        # 这样即使 video0 被占用或不是这台相机，程序也能起来。
-        if self.prefer_v4l2 and (self.split_stereo_frame or "").lower() == "always":
+        # 双目模式下优先走 V4L2 直连。失败再落回 Picamera2，这样即使
+        # video1 被占用或不是这台相机，程序也能起来。
+        if self.prefer_v4l2 and (self.split_stereo_frame or "").lower() != "never":
             if self._open_v4l2_capture("preferred"):
                 return
 
@@ -171,13 +210,24 @@ class Camera:
         """
         How big to ask the device for.
 
-        "always" means the caller has told us the frame is a dual-lens pair. In
-        that case we need the device's native side-by-side geometry, or the
-        per-eye crop afterwards is half of a scaled pair and the depth pipeline
-        gets a squashed image. "auto"/"never" stay at the target size so a normal
-        single-lens camera is not forced into a resolution it does not offer.
+        The two eyes arrive side by side in one frame, so the caller's
+        width/height are the *per-eye* size and the device has to be asked for
+        the double-wide pair, or the crop afterwards keeps half of a scaled
+        frame and the depth pipeline gets a squashed image.
+
+        "always" always requests the pair. "auto" requests it when the caller's
+        width and height line up with exactly one eye of stereo_capture_width /
+        stereo_capture_height -- that is the statement "these dimensions
+        describe one eye of a stereo pair". Any other geometry keeps the
+        single-lens behaviour, so a normal webcam is not forced into a
+        resolution it does not offer. "never" always keeps the target size.
         """
-        if (self.split_stereo_frame or "auto").lower() != "always":
+        mode = (self.split_stereo_frame or "auto").lower()
+        if mode == "never":
+            return (int(self.width), int(self.height))
+        looks_like_eye = (int(self.width) * 2 == int(self.stereo_capture_width)
+                          and int(self.height) == int(self.stereo_capture_height))
+        if mode == "auto" and not looks_like_eye:
             return (int(self.width), int(self.height))
         return (max(int(self.width), self.stereo_capture_width),
                 max(int(self.height), self.stereo_capture_height))
@@ -214,22 +264,52 @@ class Camera:
             except Exception as e:
                 logging.warning("Camera: setting CAP_PROP_GAIN failed: %s", e)
 
+    def _candidate_capture_devices(self):
+        """
+        V4L2 nodes worth trying, most likely first.
+
+        Only USB nodes are returned by the auto-scan. On this Pi /dev/video0 is
+        a CSI/unicam node that opens cleanly and never produces a frame, and the
+        codec / ISP nodes below it behave the same way. Reading one yields no
+        error, just a synthetic frame, so an open that "succeeds" there is more
+        dangerous than useless.
+        """
+        candidates = []
+        if self.v4l2_device:
+            try:
+                candidates.append(int(self.v4l2_device))
+            except ValueError:
+                candidates.append(self.v4l2_device)
+
+        usb_nodes = [p for p in glob.glob("/dev/video*") if _is_usb_video_node(p)]
+        for node in sorted(usb_nodes, key=_device_sort_key):
+            if node not in candidates:
+                candidates.append(node)
+        return candidates
+
     def _open_v4l2_capture(self, why: str) -> bool:
         """
-        Try `cv2.VideoCapture(0)` at the configured capture size.
+        Try each candidate node until one actually produces a frame.
 
-        Called from start() as either the preferred path (prefer_v4l2 + stereo
-        mode) or the fallback after Picamera2 failed. Returns True when a live
-        handle is open; on any failure the handle is released and Picamera2 is
-        still available as a last resort, so this never turns a working run into
-        a broken one.
+        Reading one frame is the point. `isOpened()` alone is not enough: a node
+        that opens but never delivers a frame used to be treated as success, and
+        every later capture then fell through to the synthetic road, so the car
+        followed a drawn line instead of the track.
         """
         if cv2 is None:
             return False
+        for device in self._candidate_capture_devices():
+            if self._try_open_v4l2(device, why):
+                return True
+        logging.warning("OpenCV VideoCapture (%s) found no usable USB video node.", why)
+        return False
+
+    def _try_open_v4l2(self, device, why: str) -> bool:
         try:
-            self.cap = cv2.VideoCapture(0)
+            backend = getattr(cv2, "CAP_V4L2", cv2.CAP_ANY)
+            self.cap = cv2.VideoCapture(device, backend)
             if not self.cap.isOpened():
-                logging.warning("OpenCV VideoCapture (%s) could not open index 0.", why)
+                logging.debug("V4L2: %s could not be opened.", device)
                 self._release_cap()
                 return False
 
@@ -252,9 +332,9 @@ class Camera:
             actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
             actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
             logging.info(
-                "V4L2 negotiated (%s): %dx%d @ %.1ffps, fourcc '%s' "
+                "V4L2 negotiated (%s, %s): %dx%d @ %.1ffps, fourcc '%s' "
                 "(requested %dx%d @ %dfps, fourcc '%s')",
-                why, actual_w, actual_h, actual_fps,
+                device, why, actual_w, actual_h, actual_fps,
                 actual_fourcc or "(unreported)",
                 self._capture_size[0], self._capture_size[1], self.framerate,
                 self.v4l2_fourcc or "(none)")
@@ -264,8 +344,8 @@ class Camera:
                     "V4L2: device ignored the requested pixel format '%s' and is "
                     "streaming '%s'. On a full-width stereo pair that format is the "
                     "usual reason for a 25fps cap -- run "
-                    "`v4l2-ctl -d /dev/video0 --list-formats-ext` and use one of the "
-                    "listed formats.", self.v4l2_fourcc, actual_fourcc)
+                    "`v4l2-ctl -d %s --list-formats-ext` and use one of the "
+                    "listed formats.", self.v4l2_fourcc, actual_fourcc, device)
             if (actual_w and actual_h
                     and (actual_w != self._capture_size[0]
                          or actual_h != self._capture_size[1])):
@@ -276,12 +356,25 @@ class Camera:
                     actual_w, actual_h,
                     self._capture_size[0], self._capture_size[1])
 
+            # 关键验证：真正读一帧。isOpened() 为 True 还不够 —— 有些节点（比如
+            # 无 CSI 模组时的 /dev/video0）能打开但永远不出帧，旧代码会把它当成功，
+            # 之后每帧都落到合成假图，车实际上在"看"一条画出来的路。
+            ok, test_frame = self.cap.read()
+            if not ok or test_frame is None:
+                logging.warning(
+                    "V4L2: %s opened but produced no frame. Trying the next node.",
+                    device)
+                self._release_cap()
+                return False
+            self._remember_raw(test_frame)
+
             self.is_running = True
-            logging.info("✅ OpenCV VideoCapture (%s) started at %dx%d @ %dfps.",
-                         why, self._capture_size[0], self._capture_size[1], self.framerate)
+            logging.info("✅ OpenCV VideoCapture (%s) started at %dx%d @ %dfps using %s.",
+                         why, self._capture_size[0], self._capture_size[1],
+                         self.framerate, device)
             return True
         except Exception as e:
-            logging.warning(f"OpenCV VideoCapture ({why}) raised: {e}")
+            logging.warning(f"OpenCV VideoCapture ({why}, {device}) raised: {e}")
             self._release_cap()
             return False
 

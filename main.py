@@ -257,13 +257,16 @@ def main():
         stereo_capture_width=config.camera.stereo_capture_width,
         stereo_capture_height=config.camera.stereo_capture_height,
         prefer_v4l2=config.camera.prefer_v4l2,
-        # V4L2 采集格式与曝光控制。
+        # V4L2 节点与采集格式。
         #
-        # 这 4 个参数不传进去，config.py 里新增的字段就是死代码——Camera 用的是
-        # 显式关键字传参，不是 **vars(config.camera)，任何漏传的字段都会静默
-        # 使用 Camera.__init__ 的默认值。之前 v4l2_fourcc 一直生效是因为默认值
-        # 就是 "MJPG"，但曝光/增益这几个默认是 -1（不干预），必须在 config 里
-        # 改动才会起作用——所以这里必须显式转发。
+        # v4l2_device 空串表示自动扫描 USB 节点。在这台 Pi 上必须让 Camera 跳过
+        # /dev/video0（CSI/unicam，打开成功但永远读不出帧），否则它会认为相机
+        # 正常、实际每帧都落到合成假图。camera.py 现在会读一帧验证后才宣告成功。
+        #
+        # 这 4 个格式/曝光参数也必须显式转发：Camera 用的是显式关键字传参，
+        # 不是 **vars(config.camera)，任何漏传的字段都会静默使用 Camera.__init__
+        # 的默认值。
+        v4l2_device=config.camera.v4l2_device,
         v4l2_fourcc=config.camera.v4l2_fourcc,
         v4l2_auto_exposure_mode=config.camera.v4l2_auto_exposure_mode,
         v4l2_exposure_absolute=config.camera.v4l2_exposure_absolute,
