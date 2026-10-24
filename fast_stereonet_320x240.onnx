@@ -1,0 +1,527 @@
+
+pytorch
+2.14.1+cpu:‡Ã
+È	
+left
+feature.0.weight
+feature.0.biasconv2dnode_conv2d"Conv*
+kernel_shape@@ *
+group *
+auto_pad"NOTSET *
+	dilations@@ *
+strides@@ *
+pads@@@@ J 
+	namespace’: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.0: torch.nn.modules.conv.Conv2d/conv2d: aten.conv2d.defaultJ¤
+pkg.torch.onnx.class_hierarchy['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.conv.Conv2d', 'aten.conv2d.default']J½
+pkg.torch.onnx.fx_node¢%conv2d : [num_users=1] = call_function[target=torch.ops.aten.conv2d.default](args = (%left, %p_feature_0_weight, %p_feature_0_bias, [2, 2], [1, 1]), kwargs = {})JD
+pkg.torch.onnx.name_scopes&['', 'feature', 'feature.0', 'conv2d']J½
+pkg.torch.onnx.stack_tracežFile "L:\programming\Python\FolkRace\make_onnx.py", line 21, in forward
+    f_l = self.feature(left)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\conv.py", line 565, in forward
+    return self._conv_forward(input, self.weight, self.bias)
+ª
+conv2d
+feature.1.weight
+feature.1.bias
+feature.1.bias
+feature.1.weightgetitem,node__native_batch_norm_legit_no_training__0"BatchNormalization*
+epsilon¬Å'7 *
+momentumfff? Jæ
+	namespaceØ: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.1: torch.nn.modules.batchnorm.BatchNorm2d/_native_batch_norm_legit_no_training: aten._native_batch_norm_legit_no_training.defaultJÌ
+pkg.torch.onnx.class_hierarchy©['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.batchnorm.BatchNorm2d', 'aten._native_batch_norm_legit_no_training.default']J¬
+pkg.torch.onnx.fx_node‘%_native_batch_norm_legit_no_training : [num_users=1] = call_function[target=torch.ops.aten._native_batch_norm_legit_no_training.default](args = (%conv2d, %p_feature_1_weight, %p_feature_1_bias, %b_feature_1_running_mean, %b_feature_1_running_var, 0.1, 1e-05), kwargs = {})Jb
+pkg.torch.onnx.name_scopesD['', 'feature', 'feature.1', '_native_batch_norm_legit_no_training']Jž
+pkg.torch.onnx.stack_traceÿFile "L:\programming\Python\FolkRace\make_onnx.py", line 21, in forward
+    f_l = self.feature(left)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\batchnorm.py", line 210, in forward
+    return F.batch_norm(
+ï
+getitemrelu	node_relu"ReluJ 
+	namespace’: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.2: torch.nn.modules.activation.ReLU/relu: aten.relu.defaultJ¦
+pkg.torch.onnx.class_hierarchyƒ['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.activation.ReLU', 'aten.relu.default']J„
+pkg.torch.onnx.fx_nodej%relu : [num_users=1] = call_function[target=torch.ops.aten.relu.default](args = (%getitem,), kwargs = {})JB
+pkg.torch.onnx.name_scopes$['', 'feature', 'feature.2', 'relu']Jµ
+pkg.torch.onnx.stack_trace–File "L:\programming\Python\FolkRace\make_onnx.py", line 21, in forward
+    f_l = self.feature(left)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\activation.py", line 143, in forward
+    return F.relu(input, inplace=self.inplace)
+Ò	
+relu
+feature.3.weight
+feature.3.biasconv2d_1node_conv2d_1"Conv*
+kernel_shape@@ *
+group *
+auto_pad"NOTSET *
+	dilations@@ *
+strides@@ *
+pads@@@@ J¢
+	namespace”: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.3: torch.nn.modules.conv.Conv2d/conv2d_1: aten.conv2d.defaultJ¤
+pkg.torch.onnx.class_hierarchy['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.conv.Conv2d', 'aten.conv2d.default']J¿
+pkg.torch.onnx.fx_node¤%conv2d_1 : [num_users=1] = call_function[target=torch.ops.aten.conv2d.default](args = (%relu, %p_feature_3_weight, %p_feature_3_bias, [2, 2], [1, 1]), kwargs = {})JF
+pkg.torch.onnx.name_scopes(['', 'feature', 'feature.3', 'conv2d_1']J½
+pkg.torch.onnx.stack_tracežFile "L:\programming\Python\FolkRace\make_onnx.py", line 21, in forward
+    f_l = self.feature(left)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\conv.py", line 565, in forward
+    return self._conv_forward(input, self.weight, self.bias)
+¸
+conv2d_1
+feature.4.weight
+feature.4.bias
+feature.4.bias
+feature.4.weight	getitem_3.node__native_batch_norm_legit_no_training_1__0"BatchNormalization*
+epsilon¬Å'7 *
+momentumfff? Jè
+	namespaceÚ: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.4: torch.nn.modules.batchnorm.BatchNorm2d/_native_batch_norm_legit_no_training_1: aten._native_batch_norm_legit_no_training.defaultJÌ
+pkg.torch.onnx.class_hierarchy©['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.batchnorm.BatchNorm2d', 'aten._native_batch_norm_legit_no_training.default']J°
+pkg.torch.onnx.fx_node•%_native_batch_norm_legit_no_training_1 : [num_users=1] = call_function[target=torch.ops.aten._native_batch_norm_legit_no_training.default](args = (%conv2d_1, %p_feature_4_weight, %p_feature_4_bias, %b_feature_4_running_mean, %b_feature_4_running_var, 0.1, 1e-05), kwargs = {})Jd
+pkg.torch.onnx.name_scopesF['', 'feature', 'feature.4', '_native_batch_norm_legit_no_training_1']Jž
+pkg.torch.onnx.stack_traceÿFile "L:\programming\Python\FolkRace\make_onnx.py", line 21, in forward
+    f_l = self.feature(left)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\batchnorm.py", line 210, in forward
+    return F.batch_norm(
+ý
+	getitem_3relu_1node_relu_1"ReluJ¢
+	namespace”: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.5: torch.nn.modules.activation.ReLU/relu_1: aten.relu.defaultJ¦
+pkg.torch.onnx.class_hierarchyƒ['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.activation.ReLU', 'aten.relu.default']Jˆ
+pkg.torch.onnx.fx_noden%relu_1 : [num_users=1] = call_function[target=torch.ops.aten.relu.default](args = (%getitem_3,), kwargs = {})JD
+pkg.torch.onnx.name_scopes&['', 'feature', 'feature.5', 'relu_1']Jµ
+pkg.torch.onnx.stack_trace–File "L:\programming\Python\FolkRace\make_onnx.py", line 21, in forward
+    f_l = self.feature(left)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\activation.py", line 143, in forward
+    return F.relu(input, inplace=self.inplace)
+Õ	
+right
+feature.0.weight
+feature.0.biasconv2d_2node_conv2d_2"Conv*
+kernel_shape@@ *
+group *
+auto_pad"NOTSET *
+	dilations@@ *
+strides@@ *
+pads@@@@ J¢
+	namespace”: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.0: torch.nn.modules.conv.Conv2d/conv2d_2: aten.conv2d.defaultJ¤
+pkg.torch.onnx.class_hierarchy['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.conv.Conv2d', 'aten.conv2d.default']JÀ
+pkg.torch.onnx.fx_node¥%conv2d_2 : [num_users=1] = call_function[target=torch.ops.aten.conv2d.default](args = (%right, %p_feature_0_weight, %p_feature_0_bias, [2, 2], [1, 1]), kwargs = {})JF
+pkg.torch.onnx.name_scopes(['', 'feature', 'feature.0', 'conv2d_2']J¾
+pkg.torch.onnx.stack_traceŸFile "L:\programming\Python\FolkRace\make_onnx.py", line 22, in forward
+    f_r = self.feature(right)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\conv.py", line 565, in forward
+    return self._conv_forward(input, self.weight, self.bias)
+¹
+conv2d_2
+feature.1.weight
+feature.1.bias
+feature.1.bias
+feature.1.weight	getitem_6.node__native_batch_norm_legit_no_training_2__0"BatchNormalization*
+epsilon¬Å'7 *
+momentumfff? Jè
+	namespaceÚ: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.1: torch.nn.modules.batchnorm.BatchNorm2d/_native_batch_norm_legit_no_training_2: aten._native_batch_norm_legit_no_training.defaultJÌ
+pkg.torch.onnx.class_hierarchy©['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.batchnorm.BatchNorm2d', 'aten._native_batch_norm_legit_no_training.default']J°
+pkg.torch.onnx.fx_node•%_native_batch_norm_legit_no_training_2 : [num_users=1] = call_function[target=torch.ops.aten._native_batch_norm_legit_no_training.default](args = (%conv2d_2, %p_feature_1_weight, %p_feature_1_bias, %b_feature_1_running_mean, %b_feature_1_running_var, 0.1, 1e-05), kwargs = {})Jd
+pkg.torch.onnx.name_scopesF['', 'feature', 'feature.1', '_native_batch_norm_legit_no_training_2']JŸ
+pkg.torch.onnx.stack_trace€File "L:\programming\Python\FolkRace\make_onnx.py", line 22, in forward
+    f_r = self.feature(right)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\batchnorm.py", line 210, in forward
+    return F.batch_norm(
+þ
+	getitem_6relu_2node_relu_2"ReluJ¢
+	namespace”: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.2: torch.nn.modules.activation.ReLU/relu_2: aten.relu.defaultJ¦
+pkg.torch.onnx.class_hierarchyƒ['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.activation.ReLU', 'aten.relu.default']Jˆ
+pkg.torch.onnx.fx_noden%relu_2 : [num_users=1] = call_function[target=torch.ops.aten.relu.default](args = (%getitem_6,), kwargs = {})JD
+pkg.torch.onnx.name_scopes&['', 'feature', 'feature.2', 'relu_2']J¶
+pkg.torch.onnx.stack_trace—File "L:\programming\Python\FolkRace\make_onnx.py", line 22, in forward
+    f_r = self.feature(right)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\activation.py", line 143, in forward
+    return F.relu(input, inplace=self.inplace)
+×	
+relu_2
+feature.3.weight
+feature.3.biasconv2d_3node_conv2d_3"Conv*
+kernel_shape@@ *
+group *
+auto_pad"NOTSET *
+	dilations@@ *
+strides@@ *
+pads@@@@ J¢
+	namespace”: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.3: torch.nn.modules.conv.Conv2d/conv2d_3: aten.conv2d.defaultJ¤
+pkg.torch.onnx.class_hierarchy['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.conv.Conv2d', 'aten.conv2d.default']JÁ
+pkg.torch.onnx.fx_node¦%conv2d_3 : [num_users=1] = call_function[target=torch.ops.aten.conv2d.default](args = (%relu_2, %p_feature_3_weight, %p_feature_3_bias, [2, 2], [1, 1]), kwargs = {})JF
+pkg.torch.onnx.name_scopes(['', 'feature', 'feature.3', 'conv2d_3']J¾
+pkg.torch.onnx.stack_traceŸFile "L:\programming\Python\FolkRace\make_onnx.py", line 22, in forward
+    f_r = self.feature(right)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\conv.py", line 565, in forward
+    return self._conv_forward(input, self.weight, self.bias)
+¹
+conv2d_3
+feature.4.weight
+feature.4.bias
+feature.4.bias
+feature.4.weight	getitem_9.node__native_batch_norm_legit_no_training_3__0"BatchNormalization*
+epsilon¬Å'7 *
+momentumfff? Jè
+	namespaceÚ: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.4: torch.nn.modules.batchnorm.BatchNorm2d/_native_batch_norm_legit_no_training_3: aten._native_batch_norm_legit_no_training.defaultJÌ
+pkg.torch.onnx.class_hierarchy©['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.batchnorm.BatchNorm2d', 'aten._native_batch_norm_legit_no_training.default']J°
+pkg.torch.onnx.fx_node•%_native_batch_norm_legit_no_training_3 : [num_users=1] = call_function[target=torch.ops.aten._native_batch_norm_legit_no_training.default](args = (%conv2d_3, %p_feature_4_weight, %p_feature_4_bias, %b_feature_4_running_mean, %b_feature_4_running_var, 0.1, 1e-05), kwargs = {})Jd
+pkg.torch.onnx.name_scopesF['', 'feature', 'feature.4', '_native_batch_norm_legit_no_training_3']JŸ
+pkg.torch.onnx.stack_trace€File "L:\programming\Python\FolkRace\make_onnx.py", line 22, in forward
+    f_r = self.feature(right)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\batchnorm.py", line 210, in forward
+    return F.batch_norm(
+þ
+	getitem_9relu_3node_relu_3"ReluJ¢
+	namespace”: __main__.LightweightStereoNet/feature: torch.nn.modules.container.Sequential/feature.5: torch.nn.modules.activation.ReLU/relu_3: aten.relu.defaultJ¦
+pkg.torch.onnx.class_hierarchyƒ['__main__.LightweightStereoNet', 'torch.nn.modules.container.Sequential', 'torch.nn.modules.activation.ReLU', 'aten.relu.default']Jˆ
+pkg.torch.onnx.fx_noden%relu_3 : [num_users=1] = call_function[target=torch.ops.aten.relu.default](args = (%getitem_9,), kwargs = {})JD
+pkg.torch.onnx.name_scopes&['', 'feature', 'feature.5', 'relu_3']J¶
+pkg.torch.onnx.stack_trace—File "L:\programming\Python\FolkRace\make_onnx.py", line 22, in forward
+    f_r = self.feature(right)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\container.py", line 259, in forward
+    input = module(input)
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\activation.py", line 143, in forward
+    return F.relu(input, inplace=self.inplace)
+ý
+relu_1
+relu_3subnode_sub"SubJA
+	namespace4: __main__.LightweightStereoNet/sub: aten.sub.TensorJV
+pkg.torch.onnx.class_hierarchy4['__main__.LightweightStereoNet', 'aten.sub.Tensor']Jˆ
+pkg.torch.onnx.fx_noden%sub : [num_users=1] = call_function[target=torch.ops.aten.sub.Tensor](args = (%relu_1, %relu_3), kwargs = {})J)
+pkg.torch.onnx.name_scopes['', 'sub']J…
+pkg.torch.onnx.stack_tracegFile "L:\programming\Python\FolkRace\make_onnx.py", line 23, in forward
+    diff = torch.abs(f_l - f_r)
+ô
+subabs_1
+node_abs_1"AbsJD
+	namespace7: __main__.LightweightStereoNet/abs_1: aten.abs.defaultJW
+pkg.torch.onnx.class_hierarchy5['__main__.LightweightStereoNet', 'aten.abs.default']J€
+pkg.torch.onnx.fx_nodef%abs_1 : [num_users=1] = call_function[target=torch.ops.aten.abs.default](args = (%sub,), kwargs = {})J+
+pkg.torch.onnx.name_scopes['', 'abs_1']J…
+pkg.torch.onnx.stack_tracegFile "L:\programming\Python\FolkRace\make_onnx.py", line 23, in forward
+    diff = torch.abs(f_l - f_r)
+
+abs_1
+disp_head.weight
+disp_head.biasconv2d_4node_conv2d_4"Conv*
+kernel_shape@@ *
+group *
+auto_pad"NOTSET *
+	dilations@@ *
+strides@@ *
+pads@@@@ Jr
+	namespacee: __main__.LightweightStereoNet/disp_head: torch.nn.modules.conv.Conv2d/conv2d_4: aten.conv2d.defaultJz
+pkg.torch.onnx.class_hierarchyX['__main__.LightweightStereoNet', 'torch.nn.modules.conv.Conv2d', 'aten.conv2d.default']JÀ
+pkg.torch.onnx.fx_node¥%conv2d_4 : [num_users=1] = call_function[target=torch.ops.aten.conv2d.default](args = (%abs_1, %p_disp_head_weight, %p_disp_head_bias, [1, 1], [1, 1]), kwargs = {})J;
+pkg.torch.onnx.name_scopes['', 'disp_head', 'conv2d_4']JÑ
+pkg.torch.onnx.stack_trace²File "L:\programming\Python\FolkRace\make_onnx.py", line 24, in forward
+    disp = torch.sigmoid(self.disp_head(diff)) * self.max_disp
+  File "L:\programming\Python\FolkRace\.venv\Lib\site-packages\torch\nn\modules\conv.py", line 565, in forward
+    return self._conv_forward(input, self.weight, self.bias)
+¸
+conv2d_4sigmoidnode_sigmoid"SigmoidJJ
+	namespace=: __main__.LightweightStereoNet/sigmoid: aten.sigmoid.defaultJ[
+pkg.torch.onnx.class_hierarchy9['__main__.LightweightStereoNet', 'aten.sigmoid.default']J‹
+pkg.torch.onnx.fx_nodeq%sigmoid : [num_users=1] = call_function[target=torch.ops.aten.sigmoid.default](args = (%conv2d_4,), kwargs = {})J-
+pkg.torch.onnx.name_scopes['', 'sigmoid']J¥
+pkg.torch.onnx.stack_trace†File "L:\programming\Python\FolkRace\make_onnx.py", line 24, in forward
+    disp = torch.sigmoid(self.disp_head(diff)) * self.max_disp
+½
+sigmoid
+scalar_tensor_defaultmulnode_mul"MulJA
+	namespace4: __main__.LightweightStereoNet/mul: aten.mul.TensorJV
+pkg.torch.onnx.class_hierarchy4['__main__.LightweightStereoNet', 'aten.mul.Tensor']J˜
+pkg.torch.onnx.fx_node~%mul : [num_users=1] = call_function[target=torch.ops.aten.mul.Tensor](args = (%sigmoid, %scalar_tensor_default), kwargs = {})J)
+pkg.torch.onnx.name_scopes['', 'mul']J¥
+pkg.torch.onnx.stack_trace†File "L:\programming\Python\FolkRace\make_onnx.py", line 24, in forward
+    disp = torch.sigmoid(self.disp_head(diff)) * self.max_disp
+§
+mul
+ 
+ 
+val_30	disparitynode_upsample_bilinear2d"Resize*
+mode"linear *
+cubic_coeff_a  @¿ */
+coordinate_transformation_mode"
+half_pixel *
+exclude_outside  *
+nearest_mode"floor *
+	antialias  *
+extrapolation_value     *&
+keep_aspect_ratio_policy"stretch J^
+	namespaceQ: __main__.LightweightStereoNet/upsample_bilinear2d: aten.upsample_bilinear2d.vecJc
+pkg.torch.onnx.class_hierarchyA['__main__.LightweightStereoNet', 'aten.upsample_bilinear2d.vec']J³
+pkg.torch.onnx.fx_node˜%upsample_bilinear2d : [num_users=1] = call_function[target=torch.ops.aten.upsample_bilinear2d.vec](args = (%mul, [240, 320], False, None), kwargs = {})J9
+pkg.torch.onnx.name_scopes['', 'upsample_bilinear2d']JÈ
+pkg.torch.onnx.stack_trace©File "L:\programming\Python\FolkRace\make_onnx.py", line 26, in forward
+    return nn.functional.interpolate(disp, size=(240, 320), mode='bilinear', align_corners=False)
+main_graph*iBfeature.0.weightj,
+location fast_stereonet_320x240.onnx.dataj
+offset0j
+length1728p*VBfeature.0.biasJ@Ç‚¾æ$>=?>Œ\R=†j¨=ÐÂº¼„ß7½`OÚ½h„p½ÌB¾êâÙ=}¾>`¶¼{Ô$>Nû¾è	C=*XBfeature.1.weightJ@  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?*VBfeature.1.biasJ@                                                                *— Bfeature.3.biasJ€”’Œ½¬Ä<dAÓ<àÝ½Y3ˆ=H+j<·ù›½üN¶¼¥Š–=ŽTd=°x=Psb½¾&=Ã>½ˆª=½÷Ž”=‹;=4àõ<ŒJ§<@/%=º$ª½–U3=<Ð’½œ½6]Ñ¼âðK=Õš=ðá< ¯b¼Û=àˆ=äQ<*™ Bfeature.4.weightJ€  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?  €?*— Bfeature.4.biasJ€                                                                                                                                *l Bdisp_head.weightj,
+location fast_stereonet_320x240.onnx.dataj
+offset1728j
+length1152p*Bdisp_head.biasJPtÇ¼*m Bfeature.3.weightj,
+location fast_stereonet_320x240.onnx.dataj
+offset2880j
+length18432p*Bscalar_tensor_defaultJ  @C*.Bval_30J               ð       @      ZÉ
+left
+
+
+
+ð
+À"=
+/pkg.torch.export.graph_signature.InputSpec.kind
+USER_INPUT"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone")
+!pkg.torch.onnx.original_node_nameleftZË
+right
+
+
+
+ð
+À"=
+/pkg.torch.export.graph_signature.InputSpec.kind
+USER_INPUT"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"*
+!pkg.torch.onnx.original_node_namerightb 
+	disparity
+
+
+
+ð
+À"?
+0pkg.torch.export.graph_signature.OutputSpec.kindUSER_OUTPUT"8
+!pkg.torch.onnx.original_node_nameupsample_bilinear2djà
+feature.0.weight
+
+
+
+
+"<
+/pkg.torch.export.graph_signature.InputSpec.kind	PARAMETER"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"7
+!pkg.torch.onnx.original_node_namep_feature_0_weightjÐ
+feature.0.bias
+
+
+"<
+/pkg.torch.export.graph_signature.InputSpec.kind	PARAMETER"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"5
+!pkg.torch.onnx.original_node_namep_feature_0_biasjÔ
+feature.1.weight
+
+
+"<
+/pkg.torch.export.graph_signature.InputSpec.kind	PARAMETER"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"7
+!pkg.torch.onnx.original_node_namep_feature_1_weightjÐ
+feature.1.bias
+
+
+"<
+/pkg.torch.export.graph_signature.InputSpec.kind	PARAMETER"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"5
+!pkg.torch.onnx.original_node_namep_feature_1_biasjÐ
+feature.3.bias
+
+
+ "<
+/pkg.torch.export.graph_signature.InputSpec.kind	PARAMETER"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"5
+!pkg.torch.onnx.original_node_namep_feature_3_biasjÔ
+feature.4.weight
+
+
+ "<
+/pkg.torch.export.graph_signature.InputSpec.kind	PARAMETER"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"7
+!pkg.torch.onnx.original_node_namep_feature_4_weightjÐ
+feature.4.bias
+
+
+ "<
+/pkg.torch.export.graph_signature.InputSpec.kind	PARAMETER"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"5
+!pkg.torch.onnx.original_node_namep_feature_4_biasjà
+disp_head.weight
+
+
+ 
+
+"<
+/pkg.torch.export.graph_signature.InputSpec.kind	PARAMETER"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"7
+!pkg.torch.onnx.original_node_namep_disp_head_weightjÐ
+disp_head.bias
+
+
+"<
+/pkg.torch.export.graph_signature.InputSpec.kind	PARAMETER"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"5
+!pkg.torch.onnx.original_node_namep_disp_head_biasjà
+feature.3.weight
+
+ 
+
+
+"<
+/pkg.torch.export.graph_signature.InputSpec.kind	PARAMETER"=
+5pkg.torch.export.graph_signature.InputSpec.persistentNone"7
+!pkg.torch.onnx.original_node_namep_feature_3_weightjS
+scalar_tensor_default
+ "2
+$pkg.onnxscript.optimizer.folded_from
+['val_26']jc
+val_30
+
+
+"M
+$pkg.onnxscript.optimizer.folded_from%['mul', 'val_27', 'val_28', 'val_29']j!
+conv2d
+
+
+
+x
+ j"
+getitem
+
+
+
+x
+ j
+relu
+
+
+
+x
+ j"
+conv2d_1
+
+
+ 
+<
+Pj#
+	getitem_3
+
+
+ 
+<
+Pj 
+relu_1
+
+
+ 
+<
+Pj#
+conv2d_2
+
+
+
+x
+ j$
+	getitem_6
+
+
+
+x
+ j!
+relu_2
+
+
+
+x
+ j"
+conv2d_3
+
+
+ 
+<
+Pj#
+	getitem_9
+
+
+ 
+<
+Pj 
+relu_3
+
+
+ 
+<
+Pj
+sub
+
+
+ 
+<
+Pj
+abs_1
+
+
+ 
+<
+Pj"
+conv2d_4
+
+
+
+<
+Pj!
+sigmoid
+
+
+
+<
+Pj
+mul
+
+
+
+<
+P‚¨	
+0pkg.torch.export.ExportedProgram.graph_signatureó
+# inputs
+p_feature_0_weight: PARAMETER target='feature.0.weight'
+p_feature_0_bias: PARAMETER target='feature.0.bias'
+p_feature_1_weight: PARAMETER target='feature.1.weight'
+p_feature_1_bias: PARAMETER target='feature.1.bias'
+p_feature_3_weight: PARAMETER target='feature.3.weight'
+p_feature_3_bias: PARAMETER target='feature.3.bias'
+p_feature_4_weight: PARAMETER target='feature.4.weight'
+p_feature_4_bias: PARAMETER target='feature.4.bias'
+p_disp_head_weight: PARAMETER target='disp_head.weight'
+p_disp_head_bias: PARAMETER target='disp_head.bias'
+b_feature_1_running_mean: BUFFER target='feature.1.running_mean' persistent=True
+b_feature_1_running_var: BUFFER target='feature.1.running_var' persistent=True
+b_feature_1_num_batches_tracked: BUFFER target='feature.1.num_batches_tracked' persistent=True
+b_feature_4_running_mean: BUFFER target='feature.4.running_mean' persistent=True
+b_feature_4_running_var: BUFFER target='feature.4.running_var' persistent=True
+b_feature_4_num_batches_tracked: BUFFER target='feature.4.num_batches_tracked' persistent=True
+left: USER_INPUT
+right: USER_INPUT
+
+# outputs
+upsample_bilinear2d: USER_OUTPUT
+‚8
+2pkg.torch.export.ExportedProgram.range_constraints{}B
+ 
