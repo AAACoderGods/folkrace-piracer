@@ -182,6 +182,14 @@ def parse_args() -> argparse.Namespace:
     # so a machine without a working depth device behaves identically to today.
     parser.add_argument("--allow-depth-camera", action="store_true",
                         help="Enable the depth camera (DECXIN / UVC) for forward-obstacle ranging")
+    # Fast-StereoNet overrides. These apply only when --allow-depth-camera is used
+    # and the depth backend is "stereo"; if omitted, config.py values are used.
+    parser.add_argument("--fast-stereonet-model", type=str, default=None,
+                        help="Path to Fast-StereoNet ONNX model. Overrides config.depth.stereo_fast_stereonet_model.")
+    parser.add_argument("--fast-stereonet-input-width", type=int, default=None,
+                        help="Optional Fast-StereoNet input width. Overrides config.depth.stereo_fast_stereonet_input_width.")
+    parser.add_argument("--fast-stereonet-input-height", type=int, default=None,
+                        help="Optional Fast-StereoNet input height. Overrides config.depth.stereo_fast_stereonet_input_height.")
     return parser.parse_args()
 
 
@@ -226,6 +234,14 @@ def main():
     if args.allow_depth_camera:
         config.depth.enable_depth = True
 
+    # Fast-StereoNet overrides
+    if args.fast_stereonet_model is not None:
+        config.depth.stereo_fast_stereonet_model = args.fast_stereonet_model
+    if args.fast_stereonet_input_width is not None:
+        config.depth.stereo_fast_stereonet_input_width = args.fast_stereonet_input_width
+    if args.fast_stereonet_input_height is not None:
+        config.depth.stereo_fast_stereonet_input_height = args.fast_stereonet_input_height
+
     logging.info("=" * 50)
     logging.info(" Starting Folkrace PiRacer Pro Autonomous System")
     logging.info(f" Mode: {config.vision.detection_mode}")
@@ -235,6 +251,9 @@ def main():
     logging.info(f" Sensors Enabled: {config.sensor.enable_sensors}")
     logging.info(f" Depth Camera: {config.depth.enable_depth} "
                  f"(backend: {config.depth.backend}, device: {config.depth.uvc_device})")
+    if config.depth.enable_depth and config.depth.backend == "stereo":
+        model_info = config.depth.stereo_fast_stereonet_model or "(disabled, using SGBM/BM)"
+        logging.info(f" Fast-StereoNet model: {model_info}")
     logging.info(f" Web Live Tuning: {config.remote.allow_tuning} | Web Manual Control: {config.remote.allow_manual}")
     logging.info(f" OLED Display: {config.oled.enable_oled}")
     logging.info("=" * 50)
