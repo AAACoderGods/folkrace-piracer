@@ -457,33 +457,61 @@ class DepthCamera:
 
             self._fast_stereonet_input_names = [inp.name for inp in inputs]
 
-            # Determine input height/width from model meta
-            h = w = 0
-            shape = inputs[0].shape
-            if len(shape) == 4:
-                try:
-                    h = int(shape[2])
-                    w = int(shape[3])
-                except (TypeError, ValueError):
-                    h = w = 0
+            # Determine input height/width from model meta.
+            # Supports NCHW (4-dim) and CHW (3-dim). Dynamic dims remain 0.
+            height = 0
+            width = 0
+            first_shape = inputs[0].shape
+
+            def _extract_hw(shape):
+                if shape is None:
+                    return 0, 0
+                if len(shape) == 4:
+                    # N,C,H,W or N,D,H,W etc. Use last two spatial dims.
+                    try:
+                        h = int(shape[2])
+                        w = int(shape[3])
+                    except (TypeError, ValueError):
+                        h = w = 0
+                    return h, w
+                if len(shape) == 3:
+                    # C,H,W or H,W,C -- but ONNX input is typically C,H,W.
+                    # We'll assume second and third are H,W if they make sense.
+                    try:
+                        # If the model inputs have 3 dims, the last two are usually H,W.
+                        h = int(shape[1])
+                        w = int(shape[2])
+                    except (TypeError, ValueError):
+                        h = w = 0
+                    return h, w
+                return 0, 0
+
+            height, width = _extract_hw(first_shape)
 
             # Explicit config overrides meta
             cfg_h = int(self.config.stereo_fast_stereonet_input_height)
             cfg_w = int(self.config.stereo_fast_stereonet_input_width)
             if cfg_h > 0 and cfg_w > 0:
-                h, w = cfg_h, cfg_w
+                height, width = cfg_h, cfg_w
 
-            self._fast_stereonet_input_height = h
-            self._fast_stereonet_input_width = w
+            self._fast_stereonet_input_height = height
+            self._fast_stereonet_input_width = width
             self._fast_stereonet_session = sess
             self._using_fast_stereonet = True
 
+            input_desc = []
+            for idx, inp in enumerate(inputs):
+                shape = inp.shape
+                if shape is None:
+                    shape = "dynamic"
+                input_desc.append(f"{idx}: {inp.name} {shape} {inp.type}")
             logging.info(
-                "Depth camera: Fast-StereoNet loaded from %s (input %dx%d, %d input tensor(s))",
+                "Depth camera: Fast-StereoNet loaded from %s\n"
+                "  input tensors: %s\n"
+                "  resolved input size: %dx%d (0 means dynamic/not fixed)",
                 model_path,
-                w if w > 0 else -1,
-                h if h > 0 else -1,
-                len(self._fast_stereonet_input_names))
+                "; ".join(input_desc),
+                width, height)
             return True
         except Exception as e:
             logging.warning(
@@ -698,24 +726,26 @@ class DepthCamera:
         in_h = self._fast_stereonet_input_height or h
         in_w = self._fast_stereonet_input_width or w
 
+        # Resize both eyes to the model's expected input size.
         left_resized = cv2.resize(left_gray, (in_w, in_h), interpolation=cv2.INTER_LINEAR)
         right_resized = cv2.resize(right_gray, (in_w, in_h), interpolation=cv2.INTER_LINEAR)
 
-        # Normalize to [0,1]
+        # Normalize to [0,1], matching common Fast-StereoNet exports.
+        # If your model expects a different normalization, adjust here.
         left_norm = left_resized.astype(np.float32) / 255.0
         right_norm = right_resized.astype(np.float32) / 255.0
 
-        # Build input feed
+        # Build input feed based on the number of model inputs.
         feed = {}
         if len(self._fast_stereonet_input_names) == 2:
-            # Two tensor inputs: left, right
-            left_tensor = left_norm[np.newaxis, np.newaxis, ...]  # 1,1,H,W
-            right_tensor = right_norm[np.newaxis, np.newaxis, ...]
+            # Two separate inputs: left and right grayscale tensors, NCHW with C=1.
+            left_tensor = left_norm[np.newaxis, np.newaxis, ...]  # (1,1,H,W)
+            right_tensor = right_norm[np.newaxis, np.newaxis, ...]  # (1,1,H,W)
             feed[self._fast_stereonet_input_names[0]] = left_tensor
             feed[self._fast_stereonet_input_names[1]] = right_tensor
         else:
-            # Single concatenated input: shape 1,2,H,W
-            concat = np.stack([left_norm, right_norm], axis=1)  # 1,2,H,W
+            # Single concatenated input: (1,2,H,W).
+            concat = np.stack([left_norm, right_norm], axis=1)  # (1,2,H,W)
             feed[self._fast_stereonet_input_names[0]] = concat
 
         try:
@@ -728,19 +758,26 @@ class DepthCamera:
             return None
 
         disp = outputs[0]
-        # Handle various output shapes: 1,1,H,W / 1,H,W / H,W
+        # Convert various output shapes to a 2D float32 disparity map.
         if disp.ndim == 4:
+            # Shapes: (1,1,H,W) or (1,C,H,W)
             if disp.shape[1] == 1:
                 disp = disp[0, 0]
             else:
-                disp = disp[0, 0]  # fallback
+                # If multiple channels, assume the first channel is disparity.
+                disp = disp[0, 0]
         elif disp.ndim == 3:
-            disp = disp[0]
+            # (1,H,W) or (C,H,W)
+            if disp.shape[0] == 1:
+                disp = disp[0]
+            else:
+                disp = disp[0]  # take first channel
         elif disp.ndim == 2:
             pass
         else:
             return None
 
+        # Some models output disparity scaled or as a probability map; not handled here.
         if disp.shape[:2] != (h, w):
             disp = cv2.resize(disp, (w, h), interpolation=cv2.INTER_LINEAR)
 
