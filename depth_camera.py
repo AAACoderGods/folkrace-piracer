@@ -36,6 +36,9 @@ Design rules, in order of importance:
 6. The UVC-based backends capture on a background thread.
 
 7. Calibration is per eye *width*.
+
+8. Disparity estimation may use either Fast-StereoNet (ONNX) when configured,
+   or the classical OpenCV SGBM/BM matcher as a fallback.
 """
 
 import glob
@@ -64,6 +67,14 @@ try:
 except ImportError:
     cv2 = None
     _CV2_AVAILABLE = False
+
+# Optional ONNX Runtime for Fast-StereoNet
+try:
+    import onnxruntime as ort
+    _ORT_AVAILABLE = True
+except ImportError:
+    ort = None
+    _ORT_AVAILABLE = False
 
 
 # Pixel formats that actually carry 16-bit depth over UVC.
@@ -161,6 +172,13 @@ class DepthCamera:
         self._stereo_empty_warned = False
         self._depth_scale_m = 0.001
 
+        # Fast-StereoNet / optional ONNX model
+        self._fast_stereonet_session = None
+        self._using_fast_stereonet = False
+        self._fast_stereonet_input_names: List[str] = []
+        self._fast_stereonet_input_height = 0
+        self._fast_stereonet_input_width = 0
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -181,12 +199,14 @@ class DepthCamera:
                 self.backend = "stereo"
                 self.is_running = True
                 logging.info("✅ Depth camera started: stereo (UVC on %s, "
-                             "eye %dx%d, scale=%.1f mm*px, %d disparities, %s mode)",
+                             "eye %dx%d, scale=%.1f mm*px, %d disparities, %s mode, "
+                             "disparity engine=%s)",
                              self._uvc_device_in_use,
                              self.config.stereo_width, self.config.stereo_height,
                              self._stereo_effective_scale(),
                              self.config.stereo_num_disparities,
-                             self.config.stereo_sgbm_mode if self.config.stereo_use_sgbm else "BM")
+                             self.config.stereo_sgbm_mode if self.config.stereo_use_sgbm else "BM",
+                             "Fast-StereoNet" if self._using_fast_stereonet else "SGBM/BM")
                 return
             else:
                 logging.warning("Depth camera: stereo failed to start; "
@@ -418,13 +438,77 @@ class DepthCamera:
                 eye_w, ref_w, baseline_scale, scaled)
         return scaled
 
+    def _init_fast_stereonet(self) -> bool:
+        """Try to load Fast-StereoNet ONNX model. Returns True if loaded."""
+        model_path = self.config.stereo_fast_stereonet_model
+        if not model_path or not os.path.isfile(model_path):
+            return False
+        if not _ORT_AVAILABLE:
+            logging.warning(
+                "Fast-StereoNet model configured but onnxruntime is not installed. "
+                "Falling back to SGBM.")
+            return False
+
+        try:
+            sess = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+            inputs = sess.get_inputs()
+            if not inputs:
+                raise RuntimeError("model has no inputs")
+
+            self._fast_stereonet_input_names = [inp.name for inp in inputs]
+
+            # Determine input height/width from model meta
+            h = w = 0
+            shape = inputs[0].shape
+            if len(shape) == 4:
+                try:
+                    h = int(shape[2])
+                    w = int(shape[3])
+                except (TypeError, ValueError):
+                    h = w = 0
+
+            # Explicit config overrides meta
+            cfg_h = int(self.config.stereo_fast_stereonet_input_height)
+            cfg_w = int(self.config.stereo_fast_stereonet_input_width)
+            if cfg_h > 0 and cfg_w > 0:
+                h, w = cfg_h, cfg_w
+
+            self._fast_stereonet_input_height = h
+            self._fast_stereonet_input_width = w
+            self._fast_stereonet_session = sess
+            self._using_fast_stereonet = True
+
+            logging.info(
+                "Depth camera: Fast-StereoNet loaded from %s (input %dx%d, %d input tensor(s))",
+                model_path,
+                w if w > 0 else -1,
+                h if h > 0 else -1,
+                len(self._fast_stereonet_input_names))
+            return True
+        except Exception as e:
+            logging.warning(
+                f"Failed to load Fast-StereoNet model '{model_path}': {e}. "
+                "Falling back to SGBM.")
+            self._fast_stereonet_session = None
+            self._using_fast_stereonet = False
+            self._fast_stereonet_input_names = []
+            self._fast_stereonet_input_height = 0
+            self._fast_stereonet_input_width = 0
+            return False
+
     def _start_stereo(self) -> bool:
         """Bring up stereo capture, preferring to share camera.py's raw frame."""
         scale = self._stereo_effective_scale()
+
+        # Decide disparity engine: Fast-StereoNet first, else SGBM/BM
+        self._init_fast_stereonet()
+        matcher_name = "Fast-StereoNet" if self._using_fast_stereonet else "SGBM/BM"
+
         logging.info("Depth camera: stereo starting (scale=%.1f mm*px, "
-                     "source=%s, target eye %dx%d, %d disparities, %s mode, "
+                     "disparity engine=%s, source=%s, target eye %dx%d, %d disparities, %s mode, "
                      "swap_eyes=%s, CLAHE clip=%.1f)",
                      scale,
+                     matcher_name,
                      "frame_source" if self._frame_source is not None else "(none)",
                      self.config.stereo_width, self.config.stereo_height,
                      self.config.stereo_num_disparities,
@@ -604,33 +688,72 @@ class DepthCamera:
                 except Exception:
                     pass
 
+    def _disparity_from_fast_stereonet(self, left_gray: np.ndarray,
+                                       right_gray: np.ndarray) -> Optional[np.ndarray]:
+        """Run Fast-StereoNet ONNX model and return float32 disparity map."""
+        if self._fast_stereonet_session is None:
+            return None
+
+        h, w = left_gray.shape[:2]
+        in_h = self._fast_stereonet_input_height or h
+        in_w = self._fast_stereonet_input_width or w
+
+        left_resized = cv2.resize(left_gray, (in_w, in_h), interpolation=cv2.INTER_LINEAR)
+        right_resized = cv2.resize(right_gray, (in_w, in_h), interpolation=cv2.INTER_LINEAR)
+
+        # Normalize to [0,1]
+        left_norm = left_resized.astype(np.float32) / 255.0
+        right_norm = right_resized.astype(np.float32) / 255.0
+
+        # Build input feed
+        feed = {}
+        if len(self._fast_stereonet_input_names) == 2:
+            # Two tensor inputs: left, right
+            left_tensor = left_norm[np.newaxis, np.newaxis, ...]  # 1,1,H,W
+            right_tensor = right_norm[np.newaxis, np.newaxis, ...]
+            feed[self._fast_stereonet_input_names[0]] = left_tensor
+            feed[self._fast_stereonet_input_names[1]] = right_tensor
+        else:
+            # Single concatenated input: shape 1,2,H,W
+            concat = np.stack([left_norm, right_norm], axis=1)  # 1,2,H,W
+            feed[self._fast_stereonet_input_names[0]] = concat
+
+        try:
+            outputs = self._fast_stereonet_session.run(None, feed)
+        except Exception as e:
+            logging.debug("Fast-StereoNet inference failed: %s", e)
+            return None
+
+        if not outputs:
+            return None
+
+        disp = outputs[0]
+        # Handle various output shapes: 1,1,H,W / 1,H,W / H,W
+        if disp.ndim == 4:
+            if disp.shape[1] == 1:
+                disp = disp[0, 0]
+            else:
+                disp = disp[0, 0]  # fallback
+        elif disp.ndim == 3:
+            disp = disp[0]
+        elif disp.ndim == 2:
+            pass
+        else:
+            return None
+
+        if disp.shape[:2] != (h, w):
+            disp = cv2.resize(disp, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        return disp.astype(np.float32)
+
     def _stereo_frame_to_depth(self, frame: Optional[np.ndarray],
                                scale: float) -> Optional[np.ndarray]:
         """
         Turn one double-wide frame into a float32 millimetre depth map, or None.
 
-        The left half is the reference and the right half the match image. Three
-        changes since the previous version, each targeting one of the symptoms
-        behind "the reading is wrong / missing half the time":
-
-        1. CLAHE on each eye before matching. SGBM needs edges; a plain indoor
-           wall or floor gives it almost none, and the valid-pixel ratio falls to
-           single digits. Local contrast equalisation pulls weak texture out of
-           the noise floor and routinely lifts that ratio by 5-10x. It changes
-           contrast only, not geometry, so the calibration constant is unaffected.
-
-        2. stereo_swap_eyes: some dual-lens UVC modules put the right eye on the
-           left of the frame, and SGBM assumes left-on-left. With the eyes
-           reversed the disparity map is close to empty -- an easy thing to blame
-           on calibration. One flag fixes it once test_stereo_debug.py has shown
-           that is what is happening.
-
-        3. Reads pre_filter_cap and the SGBM mode from config rather than the
-           hardcoded 31 / SGBM defaults, so the tuning that finally works on the
-           car can be saved rather than re-derived.
-
-        `scale` must already be normalised to this frame's eye width; see
-        _scale_for_eye_width.
+        Disparity estimation uses Fast-StereoNet if configured and loadable,
+        otherwise falls back to the previous SGBM/BM path. Both paths convert
+        disparity to depth via the same calibrated scale.
         """
         if frame is None or not isinstance(frame, np.ndarray) or frame.ndim != 3:
             return None
@@ -663,65 +786,83 @@ class DepthCamera:
             logging.debug("stereo: grayscale conversion failed: %s", e)
             return None
 
-        # CLAHE：局部对比度增强，低光/弱纹理场景的匹配率关键提升项。
-        clip = float(getattr(self.config, "stereo_clahe_clip_limit", 0.0))
-        if clip > 0.0:
+        # Fast-StereoNet path
+        if self._using_fast_stereonet:
+            disparity = self._disparity_from_fast_stereonet(left_g, right_g)
+            if disparity is None:
+                # fall back to SGBM once if model inference fails
+                logging.debug("Fast-StereoNet failed, falling back to SGBM for this frame")
+                disparity = None  # will be handled below? no, we'll execute SGBM code
+                # but we continue to SGBM branch by setting flag?
+                # For simplicity, we let code fall through by using a guard.
+                # We'll just compute SGBM directly.
+                pass
+        else:
+            disparity = None
+
+        if disparity is None:
+            # SGBM/BM path
+            clip = float(getattr(self.config, "stereo_clahe_clip_limit", 0.0))
+            left_proc = left_g
+            right_proc = right_g
+            if clip > 0.0:
+                try:
+                    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
+                    left_proc = clahe.apply(left_g)
+                    right_proc = clahe.apply(right_g)
+                except Exception as e:
+                    logging.debug("stereo: CLAHE failed (non-critical): %s", e)
+
+            num_disp = int(self.config.stereo_num_disparities)
+            if num_disp < 16 or num_disp % 16 != 0:
+                num_disp = 128
+            block = int(self.config.stereo_block_size)
+            if block < 5 or block % 2 == 0:
+                block = 15
+
+            pre_filter = int(getattr(self.config, "stereo_pre_filter_cap", 31))
+            if pre_filter < 1:
+                pre_filter = 31
+
             try:
-                clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
-                left_g = clahe.apply(left_g)
-                right_g = clahe.apply(right_g)
+                if self.config.stereo_use_sgbm:
+                    p1 = 8 * block * block
+                    p2 = 32 * block * block
+                    matcher = cv2.StereoSGBM_create(
+                        minDisparity=int(self.config.stereo_min_disparity),
+                        numDisparities=num_disp,
+                        blockSize=block,
+                        P1=p1,
+                        P2=p2,
+                        disp12MaxDiff=max(0, int(self.config.stereo_disp12_max_diff)),
+                        uniquenessRatio=max(0, int(self.config.stereo_uniqueness_ratio)),
+                        speckleWindowSize=max(0, int(self.config.stereo_speckle_window_size)),
+                        speckleRange=max(0, int(self.config.stereo_speckle_range)),
+                        preFilterCap=pre_filter,
+                        mode=_sgbm_mode_flag(getattr(self.config, "stereo_sgbm_mode", "3way")),
+                    )
+                else:
+                    matcher = cv2.StereoBM_create(numDisparities=num_disp, blockSize=block)
+                raw16 = matcher.compute(left_proc, right_proc)
             except Exception as e:
-                logging.debug("stereo: CLAHE failed (non-critical): %s", e)
+                logging.debug("stereo: disparity matcher failed: %s", e)
+                return None
+            if raw16 is None:
+                return None
 
-        num_disp = int(self.config.stereo_num_disparities)
-        if num_disp < 16 or num_disp % 16 != 0:
-            num_disp = 128
-        block = int(self.config.stereo_block_size)
-        if block < 5 or block % 2 == 0:
-            block = 15
+            if raw16.dtype != np.int16:
+                raw16 = raw16.astype(np.int16)
+            raw16[raw16 < 0] = 0
+            try:
+                cv2.filterSpeckles(raw16, 0,
+                                   max(0, int(self.config.stereo_speckle_window_size)),
+                                   max(0, int(self.config.stereo_speckle_range)))
+            except Exception as e:
+                logging.debug("stereo: filterSpeckles failed (non-critical): %s", e)
 
-        pre_filter = int(getattr(self.config, "stereo_pre_filter_cap", 31))
-        if pre_filter < 1:
-            pre_filter = 31
+            disparity = raw16.astype(np.float32) / 16.0
 
-        try:
-            if self.config.stereo_use_sgbm:
-                p1 = 8 * block * block
-                p2 = 32 * block * block
-                matcher = cv2.StereoSGBM_create(
-                    minDisparity=int(self.config.stereo_min_disparity),
-                    numDisparities=num_disp,
-                    blockSize=block,
-                    P1=p1,
-                    P2=p2,
-                    disp12MaxDiff=max(0, int(self.config.stereo_disp12_max_diff)),
-                    uniquenessRatio=max(0, int(self.config.stereo_uniqueness_ratio)),
-                    speckleWindowSize=max(0, int(self.config.stereo_speckle_window_size)),
-                    speckleRange=max(0, int(self.config.stereo_speckle_range)),
-                    preFilterCap=pre_filter,
-                    mode=_sgbm_mode_flag(getattr(self.config, "stereo_sgbm_mode", "3way")),
-                )
-            else:
-                matcher = cv2.StereoBM_create(numDisparities=num_disp, blockSize=block)
-            raw16 = matcher.compute(left_g, right_g)
-        except Exception as e:
-            logging.debug("stereo: disparity matcher failed: %s", e)
-            return None
-        if raw16 is None:
-            return None
-
-        if raw16.dtype != np.int16:
-            raw16 = raw16.astype(np.int16)
-        raw16[raw16 < 0] = 0
-        try:
-            cv2.filterSpeckles(raw16, 0,
-                               max(0, int(self.config.stereo_speckle_window_size)),
-                               max(0, int(self.config.stereo_speckle_range)))
-        except Exception as e:
-            logging.debug("stereo: filterSpeckles failed (non-critical): %s", e)
-
-        disparity = raw16.astype(np.float32) / 16.0
-
+        # Common post-processing for both engines
         median_k = int(self.config.stereo_median_blur)
         if median_k >= 3 and median_k % 2 == 1:
             try:
@@ -784,16 +925,18 @@ class DepthCamera:
                         self._stereo_empty_warned = True
                         logging.warning(
                             "stereo: 5 consecutive frames with NO valid depth pixels. "
-                            "The disparity matcher is not producing any matches at all. "
+                            "The disparity engine is not producing any matches at all. "
                             "Common causes, in the order worth checking:\n"
                             "  1. Lens caps / focus / a covered sensor.\n"
                             "  2. stereo_swap_eyes - some modules put the right eye on "
                             "the left of the frame. Flip it and try again.\n"
-                            "  3. Lighting - SGBM needs edges; a plain wall in a dark "
-                            "room has none. Raise stereo_clahe_clip_limit to 3.0-4.0.\n"
+                            "  3. Lighting - the engine needs edges; a plain wall in a dark "
+                            "room has none. Raise stereo_clahe_clip_limit to 3.0-4.0 for SGBM.\n"
                             "  4. stereo_scale_mm_px - if the calibration constant is "
                             "wrong, every match is out of range and looks like 'no "
                             "reading'. Run test_stereo_calib.py.\n"
+                            "  5. Fast-StereoNet model input size mismatch or missing "
+                            "normalization. Check model export and config.\n"
                             "Run test_stereo_debug.py to dump the raw left/right and "
                             "disparity frames. It shows exactly which step fails.")
 
@@ -803,13 +946,13 @@ class DepthCamera:
                     valid_px = depth[depth > 0.0]
                     median_mm = float(np.median(valid_px)) if valid_px.size else 0.0
                     logging.info(
-                        "stereo: first depth frame ready (eye %dpx, scale %.1f): "
+                        "stereo: first depth frame ready (eye %dpx, scale %.1f, engine %s): "
                         "valid pixels %.1f%%, median %.0f mm. If the ratio is low, "
-                        "SGBM cannot find matches -- the scene is too smooth / too "
-                        "far / too dark. Try raising stereo_block_size, or "
-                        "stereo_num_disparities, or fixing the exposure in "
-                        "CameraConfig.v4l2_*.",
-                        eye_w, real_scale, valid_ratio * 100.0, median_mm)
+                        "the scene may be too smooth / too far / too dark, or the model "
+                        "input size is wrong.",
+                        eye_w, real_scale,
+                        "Fast-StereoNet" if self._using_fast_stereonet else "SGBM/BM",
+                        valid_ratio * 100.0, median_mm)
 
             elapsed = time.monotonic() - started
             remaining = period - elapsed

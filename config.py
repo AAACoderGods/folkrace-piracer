@@ -287,6 +287,27 @@ class DepthCameraConfig:
     stereo_swap_eyes: bool = False
 
     # ------------------------------------------------------------------
+    # Fast-StereoNet (optional) 
+    # ------------------------------------------------------------------
+    # Provide an ONNX model path to use Fast-StereoNet for disparity estimation.
+    # Leave empty to fall back to SGBM / StereoBM.
+    #
+    # Example:
+    #   stereo_fast_stereonet_model = "/home/pi/models/fast_stereonet.onnx"
+    #
+    # The model should take either two inputs (left, right) or one input
+    # with concatenated grayscale images (shape [N,2,H,W]).
+    # Inputs are expected in float32, normalized to [0,1] (pixel/255).
+    #
+    # If the model cannot be loaded, the stereo backend automatically falls back
+    # to the classical SGBM/BM path so the car remains operational.
+    stereo_fast_stereonet_model: str = ""
+    # Optional explicit input size. 0 means "use the model's declared input size".
+    # If the model has dynamic input size, the current frame size is used.
+    stereo_fast_stereonet_input_width: int = 0
+    stereo_fast_stereonet_input_height: int = 0
+
+    # ------------------------------------------------------------------
     # Obstacle ranging
     # ------------------------------------------------------------------
 
