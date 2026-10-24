@@ -259,6 +259,8 @@ class RemoteState:
         self._steering = 0.0
         self._throttle = 0.0
         self._last_cmd_ts: Optional[float] = None   # time.monotonic() domain
+        # Deadline of the ESC reverse-engage pulse; 0 means no pulse is running.
+        self._reverse_engage_until = 0.0
         self._reset_pid_requested = True
         self._logged_source: Optional[str] = None
         self._telemetry: dict = {}
@@ -290,7 +292,13 @@ class RemoteState:
                     source, command = SOURCE_DEADMAN, DriveCommand(SOURCE_DEADMAN, 0.0, 0.0)
                 else:
                     source = SOURCE_MANUAL
-                    command = DriveCommand(SOURCE_MANUAL, self._steering, self._throttle)
+                    throttle = self._throttle
+                    if now < self._reverse_engage_until:
+                        # The ESC only latches into reverse on a strong step; after
+                        # that the operator's own value holds the car there. Clamped
+                        # so a mistyped config can never turn the pulse into forward.
+                        throttle = max(-1.0, min(0.0, self.remote.reverse_engage_pulse))
+                    command = DriveCommand(SOURCE_MANUAL, self._steering, throttle)
 
             changed = source != self._logged_source
             if changed:
@@ -327,6 +335,7 @@ class RemoteState:
                 self._mode = MODE_MANUAL
                 self._steering = 0.0
                 self._throttle = 0.0
+                self._reverse_engage_until = 0.0
                 # Arming alone must not move the car: require a fresh drive command.
                 self._last_cmd_ts = None
                 self._reset_pid_requested = True
@@ -340,6 +349,7 @@ class RemoteState:
                 self._mode = MODE_PAUSED
                 self._steering = 0.0
                 self._throttle = 0.0
+                self._reverse_engage_until = 0.0
                 self._last_cmd_ts = None
                 self._reset_pid_requested = True
 
@@ -374,10 +384,23 @@ class RemoteState:
             self._steering = self._clamp(steering,
                                          -self.remote.max_manual_steering,
                                          self.remote.max_manual_steering)
-            self._throttle = self._clamp(throttle,
-                                         self.remote.max_manual_reverse,
-                                         self.remote.max_manual_throttle)
-            self._last_cmd_ts = time.monotonic()
+            new_throttle = self._clamp(throttle,
+                                       self.remote.max_manual_reverse,
+                                       self.remote.max_manual_throttle)
+            now = time.monotonic()
+            # A press that crosses into reverse needs the ESC engage pulse -- see
+            # reverse_engage_pulse in config.py. Crossing back out cancels it, so
+            # letting go of S stops the car the same way letting go of W does.
+            if new_throttle < 0.0 <= self._throttle:
+                self._reverse_engage_until = now + self.remote.reverse_engage_s
+                logging.info("Reverse engage pulse %.2f for %.0f ms.",
+                             self.remote.reverse_engage_pulse,
+                             self.remote.reverse_engage_s * 1000.0)
+            elif new_throttle >= 0.0:
+                self._reverse_engage_until = 0.0
+
+            self._throttle = new_throttle
+            self._last_cmd_ts = now
             return {"ok": True, "mode": self._mode}
 
     def apply_tuning(self, payload: dict) -> Tuple[dict, dict]:

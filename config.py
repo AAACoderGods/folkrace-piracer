@@ -481,6 +481,18 @@ class RemoteConfig:
     max_manual_reverse: float = -0.25
     max_manual_steering: float = 1.0
 
+    # The ESC latches into reverse: it has to see one strong step into the negative
+    # range before a small value can hold the car there. Measured on the car --
+    # walking down through -0.2, -0.4, ... never engages it; a neutral -> -0.90
+    # step does; and once engaged, -0.25 keeps the car reversing.
+    #
+    # A fresh press into reverse therefore sends this pulse for reverse_engage_s
+    # before the operator's own value takes over. -1.00 / 0.35 s is the exact pulse
+    # that was verified end to end; it deliberately exceeds max_manual_reverse,
+    # which is why it is a separate field rather than a clamp.
+    reverse_engage_pulse: float = -1.00
+    reverse_engage_s: float = 0.35
+
 
 @dataclass
 class OLEDConfig:
