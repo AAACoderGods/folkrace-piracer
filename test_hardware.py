@@ -106,8 +106,8 @@ def test_steering_and_throttle():
         set_drive(0.0, 0.0)
         time.sleep(1.0)
 
-        logging.info("Testing Motor: REVERSE (-0.25) for 1.0 second...")
-        set_drive(0.0, -0.25)
+        logging.info("Testing Motor: REVERSE (-1.00) for 1.0 second...")
+        set_drive(0.0, -1.00)
         time.sleep(1.0)
 
         logging.info("Testing Motor: FINAL STOP (0.0)")
