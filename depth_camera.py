@@ -176,6 +176,7 @@ class DepthCamera:
         self._fast_stereonet_session = None
         self._using_fast_stereonet = False
         self._fast_stereonet_input_names: List[str] = []
+        self._fast_stereonet_input_shapes: List[List[int]] = []
         self._fast_stereonet_input_height = 0
         self._fast_stereonet_input_width = 0
 
@@ -456,18 +457,18 @@ class DepthCamera:
                 raise RuntimeError("model has no inputs")
 
             self._fast_stereonet_input_names = [inp.name for inp in inputs]
+            self._fast_stereonet_input_shapes = [list(inp.shape) for inp in inputs]
 
             # Determine input height/width from model meta.
             # Supports NCHW (4-dim) and CHW (3-dim). Dynamic dims remain 0.
             height = 0
             width = 0
-            first_shape = inputs[0].shape
+            first_shape = self._fast_stereonet_input_shapes[0] if self._fast_stereonet_input_shapes else None
 
             def _extract_hw(shape):
                 if shape is None:
                     return 0, 0
                 if len(shape) == 4:
-                    # N,C,H,W or N,D,H,W etc. Use last two spatial dims.
                     try:
                         h = int(shape[2])
                         w = int(shape[3])
@@ -475,10 +476,7 @@ class DepthCamera:
                         h = w = 0
                     return h, w
                 if len(shape) == 3:
-                    # C,H,W or H,W,C -- but ONNX input is typically C,H,W.
-                    # We'll assume second and third are H,W if they make sense.
                     try:
-                        # If the model inputs have 3 dims, the last two are usually H,W.
                         h = int(shape[1])
                         w = int(shape[2])
                     except (TypeError, ValueError):
@@ -520,6 +518,7 @@ class DepthCamera:
             self._fast_stereonet_session = None
             self._using_fast_stereonet = False
             self._fast_stereonet_input_names = []
+            self._fast_stereonet_input_shapes = []
             self._fast_stereonet_input_height = 0
             self._fast_stereonet_input_width = 0
             return False
@@ -716,36 +715,42 @@ class DepthCamera:
                 except Exception:
                     pass
 
-    def _disparity_from_fast_stereonet(self, left_gray: np.ndarray,
-                                       right_gray: np.ndarray) -> Optional[np.ndarray]:
+    def _disparity_from_fast_stereonet(self, left_color: np.ndarray,
+                                       right_color: np.ndarray) -> Optional[np.ndarray]:
         """Run Fast-StereoNet ONNX model and return float32 disparity map."""
         if self._fast_stereonet_session is None:
             return None
 
-        h, w = left_gray.shape[:2]
+        h, w = left_color.shape[:2]
         in_h = self._fast_stereonet_input_height or h
         in_w = self._fast_stereonet_input_width or w
 
         # Resize both eyes to the model's expected input size.
-        left_resized = cv2.resize(left_gray, (in_w, in_h), interpolation=cv2.INTER_LINEAR)
-        right_resized = cv2.resize(right_gray, (in_w, in_h), interpolation=cv2.INTER_LINEAR)
+        left_resized = cv2.resize(left_color, (in_w, in_h), interpolation=cv2.INTER_LINEAR)
+        right_resized = cv2.resize(right_color, (in_w, in_h), interpolation=cv2.INTER_LINEAR)
 
-        # Normalize to [0,1], matching common Fast-StereoNet exports.
-        # If your model expects a different normalization, adjust here.
+        # Normalize to [0,1].
         left_norm = left_resized.astype(np.float32) / 255.0
         right_norm = right_resized.astype(np.float32) / 255.0
 
-        # Build input feed based on the number of model inputs.
+        # Determine channel expectations from model inputs.
+        num_inputs = len(self._fast_stereonet_input_names)
         feed = {}
-        if len(self._fast_stereonet_input_names) == 2:
-            # Two separate inputs: left and right grayscale tensors, NCHW with C=1.
-            left_tensor = left_norm[np.newaxis, np.newaxis, ...]  # (1,1,H,W)
-            right_tensor = right_norm[np.newaxis, np.newaxis, ...]  # (1,1,H,W)
+
+        if num_inputs == 2:
+            # Two inputs: left and right. Channel count may be 1 or 3.
+            # The network's first Conv2d was defined with 3 input channels, so we
+            # keep 3 channels. If a model actually expects 1 channel, it would have
+            # been exported differently and this path would need adjustment.
+            left_tensor = left_norm.transpose(2, 0, 1)[np.newaxis, ...]   # (1, C, H, W)
+            right_tensor = right_norm.transpose(2, 0, 1)[np.newaxis, ...]
             feed[self._fast_stereonet_input_names[0]] = left_tensor
             feed[self._fast_stereonet_input_names[1]] = right_tensor
         else:
-            # Single concatenated input: (1,2,H,W).
-            concat = np.stack([left_norm, right_norm], axis=1)  # (1,2,H,W)
+            # Single concatenated input: the two 3-channel images are concatenated
+            # to a 6-channel tensor.
+            concat = np.concatenate([left_norm, right_norm], axis=2)      # H,W,6
+            concat = concat.transpose(2, 0, 1)[np.newaxis, ...]           # (1, 6, H, W)
             feed[self._fast_stereonet_input_names[0]] = concat
 
         try:
@@ -760,27 +765,23 @@ class DepthCamera:
         disp = outputs[0]
         # Convert various output shapes to a 2D float32 disparity map.
         if disp.ndim == 4:
-            # Shapes: (1,1,H,W) or (1,C,H,W)
             if disp.shape[1] == 1:
                 disp = disp[0, 0]
             else:
-                # If multiple channels, assume the first channel is disparity.
-                disp = disp[0, 0]
+                disp = disp[0, 0]   # fallback: first channel
         elif disp.ndim == 3:
-            # (1,H,W) or (C,H,W)
             if disp.shape[0] == 1:
                 disp = disp[0]
             else:
-                disp = disp[0]  # take first channel
+                disp = disp[0]
         elif disp.ndim == 2:
             pass
         else:
             return None
 
-        # Some models output disparity scaled or as a probability map; not handled here.
-        if disp.shape[:2] != (h, w):
-            disp = cv2.resize(disp, (w, h), interpolation=cv2.INTER_LINEAR)
-
+        # The model output is already at the input resolution (e.g. 320x240).
+        # Do NOT resize the disparity back to the original eye size here; that
+        # would change the pixel scale and break depth_mm = scale / disparity.
         return disp.astype(np.float32)
 
     def _stereo_frame_to_depth(self, frame: Optional[np.ndarray],
@@ -804,41 +805,32 @@ class DepthCamera:
         half = w // 2
         # 左右眼是否翻转由 config 决定；默认保持"左前右后"。
         if bool(getattr(self.config, "stereo_swap_eyes", False)):
-            left = frame[:, half:]
-            right = frame[:, :half]
+            left_color = frame[:, half:]
+            right_color = frame[:, :half]
         else:
-            left = frame[:, :half]
-            right = frame[:, half:]
+            left_color = frame[:, :half]
+            right_color = frame[:, half:]
 
-        try:
-            if left.shape[2] == 3:
-                left_g = cv2.cvtColor(left, cv2.COLOR_BGR2GRAY)
-                right_g = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
-            elif left.shape[2] == 1:
-                left_g = left[:, :, 0]
-                right_g = right[:, :, 0]
-            else:
-                return None
-        except Exception as e:
-            logging.debug("stereo: grayscale conversion failed: %s", e)
-            return None
+        eye_w = left_color.shape[1]
 
-        # Fast-StereoNet path
+        # Fast-StereoNet path -- model expects colour (3-channel) input.
         if self._using_fast_stereonet:
-            disparity = self._disparity_from_fast_stereonet(left_g, right_g)
+            disparity = self._disparity_from_fast_stereonet(left_color, right_color)
             if disparity is None:
-                # fall back to SGBM once if model inference fails
+                # If inference fails for any reason, we fall back to SGBM.
                 logging.debug("Fast-StereoNet failed, falling back to SGBM for this frame")
-                disparity = None  # will be handled below? no, we'll execute SGBM code
-                # but we continue to SGBM branch by setting flag?
-                # For simplicity, we let code fall through by using a guard.
-                # We'll just compute SGBM directly.
-                pass
         else:
             disparity = None
 
-        if disparity is None:
-            # SGBM/BM path
+        if not self._using_fast_stereonet or disparity is None:
+            # SGBM/BM path uses grayscale images.
+            try:
+                left_g = cv2.cvtColor(left_color, cv2.COLOR_BGR2GRAY)
+                right_g = cv2.cvtColor(right_color, cv2.COLOR_BGR2GRAY)
+            except Exception as e:
+                logging.debug("stereo: grayscale conversion failed: %s", e)
+                return None
+
             clip = float(getattr(self.config, "stereo_clahe_clip_limit", 0.0))
             left_proc = left_g
             right_proc = right_g
@@ -899,6 +891,15 @@ class DepthCamera:
 
             disparity = raw16.astype(np.float32) / 16.0
 
+        # For Fast-StereoNet, the disparity map is at the model input resolution.
+        # Adjust the scale accordingly: scale_mm_px was calibrated for the
+        # original eye width, but the model sees a resized eye.
+        depth_scale = scale
+        if self._using_fast_stereonet and disparity is not None:
+            model_w = self._fast_stereonet_input_width or eye_w
+            if eye_w > 0 and model_w > 0:
+                depth_scale = scale * (float(model_w) / float(eye_w))
+
         # Common post-processing for both engines
         median_k = int(self.config.stereo_median_blur)
         if median_k >= 3 and median_k % 2 == 1:
@@ -911,7 +912,7 @@ class DepthCamera:
         depth = np.zeros(disparity.shape, dtype=np.float32)
         valid = disparity > 0.0
         if np.any(valid):
-            depth[valid] = np.clip(scale / disparity[valid], 0.0, 65535.0)
+            depth[valid] = np.clip(depth_scale / disparity[valid], 0.0, 65535.0)
         return depth
 
     def _stereo_sampler_loop(self):
