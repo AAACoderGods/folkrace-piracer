@@ -747,9 +747,10 @@ class DepthCamera:
             feed[self._fast_stereonet_input_names[0]] = left_tensor
             feed[self._fast_stereonet_input_names[1]] = right_tensor
         else:
-            # Single concatenated input: the two 3-channel images are concatenated
-            # to a 6-channel tensor.
-            concat = np.concatenate([left_norm, right_norm], axis=2)      # H,W,6
+            # Single concatenated input (HITNet): left then right, 6 channels,
+            # RGB order (OpenCV frames are BGR), scaled to [0,1].
+            concat = np.concatenate([left_norm[:, :, ::-1],
+                                     right_norm[:, :, ::-1]], axis=2)     # H,W,6
             concat = concat.transpose(2, 0, 1)[np.newaxis, ...]           # (1, 6, H, W)
             feed[self._fast_stereonet_input_names[0]] = concat
 
@@ -762,21 +763,12 @@ class DepthCamera:
         if not outputs:
             return None
 
-        disp = outputs[0]
-        # Convert various output shapes to a 2D float32 disparity map.
-        if disp.ndim == 4:
-            if disp.shape[1] == 1:
-                disp = disp[0, 0]
-            else:
-                disp = disp[0, 0]   # fallback: first channel
-        elif disp.ndim == 3:
-            if disp.shape[0] == 1:
-                disp = disp[0]
-            else:
-                disp = disp[0]
-        elif disp.ndim == 2:
-            pass
-        else:
+        disp = np.asarray(outputs[0])
+        # Normalise to a 2D (H, W) map. HITNet's ONNX export is NHWC
+        # (1, H, W, 1); the home-made net is NCHW (1, 1, H, W). Drop the
+        # singleton batch/channel axes instead of guessing by position.
+        disp = np.squeeze(disp)
+        if disp.ndim != 2:
             return None
 
         # The model output is already at the input resolution (e.g. 320x240).

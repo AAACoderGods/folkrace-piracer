@@ -301,7 +301,10 @@ class DepthCameraConfig:
     #
     # If the model cannot be loaded, the stereo backend automatically falls back
     # to the classical SGBM/BM path so the car remains operational.
-    stereo_fast_stereonet_model: str = ""
+    # HITNet (Google Research, middlebury_d400, 240x320, single 6-channel RGB
+    # input, NHWC disparity output) via PINTO0309's ONNX conversion. The file is
+    # not tracked in git; if it is missing the car falls back to SGBM.
+    stereo_fast_stereonet_model: str = "models/hitnet_middlebury_240x320.onnx"
     # Optional explicit input size. 0 means "use the model's declared input size".
     # If the model has dynamic input size, the current frame size is used.
     stereo_fast_stereonet_input_width: int = 0
