@@ -944,6 +944,7 @@ class DepthCamera:
                     self._stereo_latest = depth
 
                 valid_count = 0 if depth is None else int(np.count_nonzero(depth))
+                self._maybe_record(frame, depth, valid_count)
 
                 # 连续多帧无有效读数时打印一次完整诊断，帮助定位问题。
                 if valid_count > 0:
@@ -988,6 +989,43 @@ class DepthCamera:
             remaining = period - elapsed
             if remaining > 0:
                 event.wait(remaining)
+
+    def _maybe_record(self, frame: np.ndarray, depth: Optional[np.ndarray],
+                      valid_count: int):
+        """Dump raw stereo frames + the reading they produced, for offline replay."""
+        out_dir = str(getattr(self.config, "stereo_record_dir", "") or "")
+        if not out_dir:
+            return
+        try:
+            self._record_seen = getattr(self, "_record_seen", 0) + 1
+            saved = getattr(self, "_record_saved", 0)
+            every = max(1, int(self.config.stereo_record_every))
+            if saved >= int(self.config.stereo_record_max) or self._record_seen % every:
+                return
+            os.makedirs(out_dir, exist_ok=True)
+            name = f"{saved:05d}.jpg"
+            cv2.imwrite(os.path.join(out_dir, name), frame,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            obstacle = self.measure_obstacle_mm(depth) if depth is not None else None
+            median_mm = 0.0
+            if depth is not None and valid_count:
+                median_mm = float(np.median(depth[depth > 0.0]))
+            ratio = valid_count / float(depth.size) if depth is not None else 0.0
+            new_file = not os.path.exists(os.path.join(out_dir, "index.csv"))
+            with open(os.path.join(out_dir, "index.csv"), "a", encoding="utf-8") as f:
+                if new_file:
+                    f.write("time,file,obstacle_mm,valid_ratio,median_mm,engine\n")
+                f.write("%.3f,%s,%s,%.3f,%.0f,%s\n" % (
+                    time.time(), name,
+                    "" if obstacle is None else "%.0f" % obstacle,
+                    ratio, median_mm,
+                    "onnx" if self._using_fast_stereonet else "sgbm"))
+            self._record_saved = saved + 1
+            if self._record_saved == 1:
+                logging.info("stereo: recording debug frames to %s (every %d, max %d)",
+                             out_dir, every, int(self.config.stereo_record_max))
+        except Exception as e:
+            logging.debug("stereo: record failed (non-critical): %s", e)
 
     def _capture_stereo(self):
         """Return the cached depth frame from the sampler thread."""

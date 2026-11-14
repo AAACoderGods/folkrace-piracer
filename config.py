@@ -305,6 +305,13 @@ class DepthCameraConfig:
     # input, NHWC disparity output) via PINTO0309's ONNX conversion. The file is
     # not tracked in git; if it is missing the car falls back to SGBM.
     stereo_fast_stereonet_model: str = "models/hitnet_middlebury_240x320.onnx"
+    # 调试录制：非空时，采样线程每 stereo_record_every 帧把原始双目帧存成 JPG，
+    # 并在 index.csv 里追加一行（时间、文件名、当时算出的前方距离、有效像素比、
+    # 画面中位距离）。拷回电脑后可用同一份代码离线重放，不用再靠实车肉眼判断。
+    # 最多存 stereo_record_max 张，防止写满 SD 卡。空串 = 关闭。
+    stereo_record_dir: str = ""
+    stereo_record_every: int = 3
+    stereo_record_max: int = 400
     # Optional explicit input size. 0 means "use the model's declared input size".
     # If the model has dynamic input size, the current frame size is used.
     stereo_fast_stereonet_input_width: int = 0
