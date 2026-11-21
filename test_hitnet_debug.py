@@ -127,6 +127,17 @@ def main():
         parser.error("请提供 --frame/--distance、--calibration-csv，或左右图及 --distance")
     if args.distance is not None and args.distance <= 0.0:
         parser.error("--distance 必须大于 0")
+    if args.calibration_csv and not os.path.isfile(args.calibration_csv):
+        sys.exit(
+            f"找不到标定文件：{args.calibration_csv}\n"
+            "请先手动创建 CSV，记录每张双目帧对应的实测距离，例如：\n"
+            "  frame,distance_mm\n"
+            "  00000.jpg,500\n"
+            "  00030.jpg,800\n"
+            "  00060.jpg,1200\n"
+            "frame 路径可相对于 CSV 所在目录；每个距离至少一帧，"
+            "至少需要 3 个不同距离。index.csv 不包含实测距离，不能直接用作标定表。"
+        )
 
     cfg = DepthCameraConfig()
     cam = DepthCamera(cfg)
@@ -134,7 +145,10 @@ def main():
         sys.exit("模型没加载成功（检查模型路径和 onnxruntime）")
 
     if args.calibration_csv:
-        samples, eye_w = _calibration_samples(args.calibration_csv, cam, args.swap_eyes)
+        try:
+            samples, eye_w = _calibration_samples(args.calibration_csv, cam, args.swap_eyes)
+        except (OSError, ValueError, csv.Error) as exc:
+            sys.exit(f"标定 CSV/帧读取失败：{exc}")
         if len(samples) < 3:
             sys.exit("标定至少需要 3 帧，且距离须覆盖至少 3 个不同值")
         scale_model, offset, r_squared = _fit_calibration(samples)
