@@ -1,19 +1,20 @@
-"""
-HITNet 诊断：用 test_stereo_debug.py 存下的 left.png / right.png 跑一遍模型，
-看它在已知距离的靶子上给出多大的视差，并反推出 scale。
+#!/usr/bin/env python3
+"""Inspect HITNet ranging or fit calibration from recorded stereo frames.
 
-用法（在 Pi 上，靶子放在 1.5 m 处、画面中央要有纹理）：
-    python3 test_stereo_debug.py --distance 1500        # 先存 stereo_debug/left.png 等
-    python3 test_hitnet_debug.py --distance 1500
+Record frames on the Pi with depth.stereo_record_dir set, then copy that folder
+to a machine with ONNX Runtime and the configured model. For multi-range
+calibration, create a CSV with columns ``frame,distance_mm``; paths may be
+relative to the CSV file, e.g.::
 
-输出：
-  - 模型分辨率下中心区域的视差分位数
-  - 按当前 config scale 算出的距离
-  - 若真实距离已知，反推 "应有的视差" 和 "实测视差" 的比值
-    比值 ~1  → 模型没问题，问题在别处（分位数/过滤/scale）
-    比值 >>1 → 模型视差偏大（图像未校正、左右眼反了、画面纹理差）
+    frame,distance_mm
+    00012.jpg,500
+    00048.jpg,1000
+    00105.jpg,1500
+
+The target should fill most of the centre ROI at each distance.
 """
 import argparse
+import csv
 import os
 import sys
 
@@ -24,51 +25,162 @@ from config import DepthCameraConfig
 from depth_camera import DepthCamera
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--dir", default="stereo_debug")
-    p.add_argument("--distance", type=float, required=True, help="靶子真实距离 mm")
-    p.add_argument("--swap-eyes", action="store_true")
-    args = p.parse_args()
+def _center_disparity(disparity):
+    h, w = disparity.shape
+    roi = disparity[h // 3: 2 * h // 3, w // 3: 2 * w // 3]
+    valid = roi[np.isfinite(roi) & (roi > 0.0)]
+    if valid.size < 20:
+        raise ValueError(f"中心区域有效视差点太少：{valid.size}")
+    low, high = np.percentile(valid, [10, 90])
+    stable = valid[(valid >= low) & (valid <= high)]
+    median = float(np.median(stable))
+    mad = float(np.median(np.abs(stable - median)))
+    return median, mad, float(valid.size / roi.size)
 
-    left = cv2.imread(os.path.join(args.dir, "left.png"))
-    right = cv2.imread(os.path.join(args.dir, "right.png"))
-    if left is None or right is None:
-        sys.exit("找不到 left.png / right.png，先跑 test_stereo_debug.py")
-    if args.swap_eyes:
+
+def _fit_calibration(samples):
+    """Fit model disparity = scale / distance + offset."""
+    distances = np.asarray([sample[0] for sample in samples], dtype=np.float64)
+    disparities = np.asarray([sample[1] for sample in samples], dtype=np.float64)
+    if len(np.unique(distances)) < 3:
+        raise ValueError("至少需要 3 个不同的已知距离，建议覆盖实际使用范围")
+    if (not np.all(np.isfinite(distances)) or np.any(distances <= 0.0)
+            or not np.all(np.isfinite(disparities))):
+        raise ValueError("距离必须为正数，视差必须为有限值")
+
+    design = np.column_stack((1.0 / distances, np.ones_like(distances)))
+    scale_model, offset = np.linalg.lstsq(design, disparities, rcond=None)[0]
+    if scale_model <= 0.0:
+        raise ValueError("拟合得到的视差尺度非正，请检查左右眼顺序和样本")
+    predicted = design @ np.array([scale_model, offset])
+    residual = disparities - predicted
+    total = float(np.sum((disparities - np.mean(disparities)) ** 2))
+    r_squared = 1.0 - float(np.sum(residual ** 2)) / total if total > 0.0 else 0.0
+    return float(scale_model), float(offset), r_squared
+
+
+def _load_frame(path):
+    frame = cv2.imread(path)
+    if frame is None:
+        raise ValueError(f"无法读取双目帧：{path}")
+    if frame.ndim != 3 or frame.shape[1] < 2 or frame.shape[1] % 2:
+        raise ValueError(f"帧不是有效的左右拼接图：{path} {frame.shape}")
+    half = frame.shape[1] // 2
+    return frame[:, :half], frame[:, half:]
+
+
+def _infer_disparity(cam, left, right, swap_eyes):
+    if swap_eyes:
         left, right = right, left
+    disparity = cam._disparity_from_fast_stereonet(left, right)
+    if disparity is None:
+        raise ValueError("HITNet 推理失败")
+    return disparity
+
+
+def _calibration_samples(csv_path, cam, swap_eyes):
+    samples = []
+    eye_widths = set()
+    with open(csv_path, newline="", encoding="utf-8-sig") as file:
+        rows = csv.DictReader(file)
+        if not rows.fieldnames or not {"frame", "distance_mm"}.issubset(rows.fieldnames):
+            raise ValueError("标定 CSV 必须包含 frame,distance_mm 两列")
+        for line, row in enumerate(rows, start=2):
+            frame_path = row["frame"].strip()
+            distance = float(row["distance_mm"])
+            if not frame_path:
+                raise ValueError(f"第 {line} 行缺少 frame")
+            if not os.path.isabs(frame_path):
+                frame_path = os.path.join(os.path.dirname(os.path.abspath(csv_path)), frame_path)
+            left, right = _load_frame(frame_path)
+            if left.shape != right.shape:
+                raise ValueError(f"第 {line} 行左右图尺寸不一致：{left.shape} / {right.shape}")
+            eye_widths.add(left.shape[1])
+            disparity = _infer_disparity(cam, left, right, swap_eyes)
+            median, mad, valid_ratio = _center_disparity(disparity)
+            samples.append((distance, median))
+            print(f"{os.path.basename(frame_path)}: {distance:.0f} mm, "
+                  f"视差 {median:.2f} px, MAD {mad:.2f}, 有效 {valid_ratio:.0%}")
+    if not samples:
+        raise ValueError("标定 CSV 中没有样本行")
+    if len(eye_widths) != 1:
+        raise ValueError("所有标定帧必须使用相同的单眼图像宽度")
+    return samples, eye_widths.pop()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="HITNet 单帧测距或多距离标定")
+    parser.add_argument("--dir", default="stereo_debug",
+                        help="旧格式 left.png/right.png 所在目录")
+    parser.add_argument("--distance", type=float, help="单帧靶子真实距离（mm）")
+    parser.add_argument("--frame", help="已录制的左右拼接双目帧 JPG")
+    parser.add_argument("--calibration-csv",
+                        help="标定 CSV，列为 frame,distance_mm；frame 可相对 CSV")
+    parser.add_argument("--swap-eyes", action="store_true")
+    args = parser.parse_args()
+
+    if args.calibration_csv and (args.frame or args.distance is not None):
+        parser.error("--calibration-csv 不能与 --frame 或 --distance 同时使用")
+    if args.frame and args.distance is None:
+        parser.error("--frame 模式必须提供 --distance")
+    if not args.calibration_csv and not args.frame and args.distance is None:
+        parser.error("请提供 --frame/--distance、--calibration-csv，或左右图及 --distance")
+    if args.distance is not None and args.distance <= 0.0:
+        parser.error("--distance 必须大于 0")
 
     cfg = DepthCameraConfig()
     cam = DepthCamera(cfg)
     if not cam._init_fast_stereonet():
-        sys.exit("模型没加载成功（路径/onnxruntime？）")
+        sys.exit("模型没加载成功（检查模型路径和 onnxruntime）")
+
+    if args.calibration_csv:
+        samples, eye_w = _calibration_samples(args.calibration_csv, cam, args.swap_eyes)
+        if len(samples) < 3:
+            sys.exit("标定至少需要 3 帧，且距离须覆盖至少 3 个不同值")
+        scale_model, offset, r_squared = _fit_calibration(samples)
+        model_w = cam._fast_stereonet_input_width or eye_w
+        print(f"\nHITNet 标定拟合 R²={r_squared:.4f}")
+        print("将以下两项写入 config.py 的 DepthCameraConfig：")
+        print(f"  stereo_scale_mm_px = {scale_model * cfg.stereo_width / model_w:.2f}")
+        print(f"  stereo_fast_stereonet_offset_px = {offset:.4f}")
+        print("标定点预测误差：")
+        for distance, measured in samples:
+            estimate = scale_model / (measured - offset) if measured > offset else float("inf")
+            error = (estimate - distance) / distance * 100.0
+            print(f"  实测 {distance:.0f} mm -> 预测 {estimate:.0f} mm ({error:+.1f}%)")
+        return
+
+    if args.frame:
+        left, right = _load_frame(args.frame)
+    else:
+        left = cv2.imread(os.path.join(args.dir, "left.png"))
+        right = cv2.imread(os.path.join(args.dir, "right.png"))
+        if left is None or right is None:
+            sys.exit("找不到 left.png / right.png；可用 --frame 直接读取 stereo_record 中的 JPG")
 
     eye_w = left.shape[1]
     model_w = cam._fast_stereonet_input_width or eye_w
-    disp = cam._disparity_from_fast_stereonet(left, right)
-    if disp is None:
-        sys.exit("推理失败")
-
-    scale = cam._stereo_effective_scale()
+    disparity = _infer_disparity(cam, left, right, args.swap_eyes)
+    median, mad, valid_ratio = _center_disparity(disparity)
+    scale = cam._scale_for_eye_width(cam._stereo_effective_scale(), eye_w)
     scale_model = scale * model_w / eye_w
-    expect = scale_model / args.distance
+    offset = float(cfg.stereo_fast_stereonet_offset_px)
+    estimate = scale_model / (median - offset) if median > offset else float("inf")
+    expected_disp = scale_model / args.distance
+    recommended_scale = (median - offset) * args.distance * cfg.stereo_width / model_w
 
-    h, w = disp.shape
-    roi = disp[h // 3: 2 * h // 3, w // 3: 2 * w // 3]
-    q = np.percentile(roi, [5, 10, 25, 50, 75, 90, 95])
-    print(f"眼宽 {eye_w}px, 模型宽 {model_w}px, config scale {scale:.0f} -> 模型分辨率 scale {scale_model:.0f}")
-    print(f"在 {args.distance:.0f} mm 处，按 scale 期望视差 ≈ {expect:.1f} px（模型分辨率）")
-    print("中心区域视差分位数 5/10/25/50/75/90/95: " + " ".join(f"{v:.1f}" for v in q))
-    print("按 scale 换算的距离 mm（同分位数）:      " +
-          " ".join(f"{scale_model / max(v, 1e-3):.0f}" for v in q))
-    print(f"中位数视差 / 期望视差 = {q[3] / expect:.2f}")
-    print(f"若中位数视差对应真实距离，则 scale_model 应为 {q[3] * args.distance:.0f}"
-          f"（config 里 stereo_scale_mm_px ≈ {q[3] * args.distance * eye_w / model_w:.0f}）")
+    print(f"当前测距 {estimate:.0f} mm，已知距离 {args.distance:.0f} mm")
+    print(f"中心视差 {median:.2f}px, MAD {mad:.2f}, 有效比例 {valid_ratio:.0%}")
+    print(f"模型分辨率 scale={scale_model:.0f}, offset={offset:.2f}px, "
+          f"按当前 scale 预期视差={expected_disp:.2f}px")
+    print(f"若只做单点 scale 校正，建议 stereo_scale_mm_px ≈ {recommended_scale:.0f}")
 
-    norm = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    norm = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     out = os.path.join(args.dir, "hitnet_disparity.png")
-    cv2.imwrite(out, cv2.applyColorMap(norm, cv2.COLORMAP_MAGMA))
-    print("已保存", out)
+    os.makedirs(args.dir, exist_ok=True)
+    if not cv2.imwrite(out, cv2.applyColorMap(norm, cv2.COLORMAP_MAGMA)):
+        sys.exit(f"无法保存诊断视差图：{out}")
+    print("视差图已保存：", out)
 
 
 if __name__ == "__main__":

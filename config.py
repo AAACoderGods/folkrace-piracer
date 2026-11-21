@@ -165,10 +165,11 @@ class DepthCameraConfig:
     #     depth_mm = scale_mm_px / disparity_px
     # so stereo *must* be calibrated before it can report millimetres.
     #
-    # test_stereo_calib.py measures the number for you: put a high-contrast
+    # For SGBM, test_stereo_calib.py measures the number: put a high-contrast
     # target at a known distance, run
     #     python3 test_stereo_calib.py --distance 1000
-    # and copy the printed stereo_scale_mm_px into this file.
+    # For HITNet, use test_hitnet_debug.py with frames captured at 3+ known
+    # distances; it fits both stereo_scale_mm_px and the HITNet disparity offset.
     # ------------------------------------------------------------------
 
     # 单眼分辨率（深度计算用）。
@@ -193,8 +194,7 @@ class DepthCameraConfig:
     # a wrong baseline would still be wrong.
     #
     # 39074 是从旧值 26375（432x320 单眼）按宽度线性推算的 640 宽单眼等效值，
-    # 用于把旧标定迁移过来。它不是实测值——正式比赛前请用
-    # test_stereo_calib.py 重新测量并覆盖这里。
+    # 不是实测值。正式使用 HITNet 前应按实际赛道测距做多距离标定。
     #
     # A scale of 0 means "not calibrated": the stereo backend refuses to start
     # and falls back to mock. That is deliberate, not a bug.
@@ -305,6 +305,9 @@ class DepthCameraConfig:
     # input, NHWC disparity output) via PINTO0309's ONNX conversion. The file is
     # not tracked in git; if it is missing the car falls back to SGBM.
     stereo_fast_stereonet_model: str = "models/hitnet_middlebury_240x320.onnx"
+    # Optional HITNet output-disparity offset from a multi-distance calibration.
+    # Set to 0 when uncalibrated. Units are pixels at the model output resolution.
+    stereo_fast_stereonet_offset_px: float = 0.0
     # 调试录制：非空时，采样线程每 stereo_record_every 帧把原始双目帧存成 JPG，
     # 并在 index.csv 里追加一行（时间、文件名、当时算出的前方距离、有效像素比、
     # 画面中位距离）。拷回电脑后可用同一份代码离线重放，不用再靠实车肉眼判断。

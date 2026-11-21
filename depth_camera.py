@@ -806,8 +806,10 @@ class DepthCamera:
         eye_w = left_color.shape[1]
 
         # Fast-StereoNet path -- model expects colour (3-channel) input.
+        fast_stereonet_disparity = False
         if self._using_fast_stereonet:
             disparity = self._disparity_from_fast_stereonet(left_color, right_color)
+            fast_stereonet_disparity = disparity is not None
             if disparity is None:
                 # If inference fails for any reason, we fall back to SGBM.
                 logging.debug("Fast-StereoNet failed, falling back to SGBM for this frame")
@@ -887,10 +889,13 @@ class DepthCamera:
         # Adjust the scale accordingly: scale_mm_px was calibrated for the
         # original eye width, but the model sees a resized eye.
         depth_scale = scale
-        if self._using_fast_stereonet and disparity is not None:
+        if fast_stereonet_disparity:
             model_w = self._fast_stereonet_input_width or eye_w
             if eye_w > 0 and model_w > 0:
                 depth_scale = scale * (float(model_w) / float(eye_w))
+            offset = float(getattr(self.config, "stereo_fast_stereonet_offset_px", 0.0))
+            if np.isfinite(offset) and offset != 0.0:
+                disparity = disparity - offset
 
         # Common post-processing for both engines
         median_k = int(self.config.stereo_median_blur)
